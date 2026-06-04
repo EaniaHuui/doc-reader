@@ -1,0 +1,80 @@
+MARKDOWN READER
+===============
+
+Version: 1.1.41
+Build: 41
+Last Updated: 2026-03-05
+
+CHANGELOG
+=========
+
+[1.1.41] - 2026-03-05
+--------------------
+- Add delete directory feature with confirmation modal
+- Add tree action buttons (copy + delete) for directories
+
+[1.1.40] - 2026-03-05
+--------------------
+- Hide delete button when no file is loaded (instead of showing disabled)
+
+[1.1.39] - 2026-03-05
+--------------------
+- Add delete button to topbar
+- Add delete confirmation modal with file info
+- Add visual feedback (red hover, disabled state)
+- Add ESC key support for delete modal
+- Fix delete button state management
+
+[1.1.38] - 2026-03-04
+--------------------
+- Add refresh button to topbar
+- Refresh both directory tree and current file
+- Add spinning animation for refresh button
+
+[1.1.37] - 2026-02-28
+--------------------
+Initial release with the following features:
+
+Core Features:
+- Markdown file rendering with syntax highlighting
+- Directory tree navigation
+- File search functionality
+- URL path persistence
+- Dark/Light theme toggle
+
+Authentication:
+- JWT-based login system
+- Token persistence (30 days)
+- Logout confirmation dialog
+
+Directory Management:
+- UI-based directory configuration
+- Add/remove directories via modal
+- Directory expand state memory
+- Expand/collapse all button
+- Show/hide empty directories toggle
+
+File Support:
+- .md files with Markdown rendering
+- .txt files with plain text display
+- .json files with formatted display
+- Image support with relative path resolution
+
+Navigation:
+- Internal link navigation between documents
+- Auto-expand tree and highlight current file
+- Sidebar width adjustment (drag to resize)
+- Copy path button on hover
+
+UI/UX:
+- Notion-style clean interface
+- Responsive design
+- TOC (Table of Contents) panel
+- Keyboard shortcuts
+- Toast notifications
+
+Bug Fixes:
+- Clipboard API compatibility
+- Path simplification (~ instead of absolute home directory paths)
+- Header height consistency
+- Cache refresh handling

@@ -1,0 +1,31 @@
+# Doc Reader 配置示例
+# 复制此文件为 config.yaml 并根据需要修改
+
+# 文档目录（支持多个）
+directories:
+  - path: ~/Documents/markdown
+    name: 示例文档
+  # 可以添加更多目录
+  # - path: ~/Documents/notes
+  #   name: 笔记
+
+# 服务器配置
+server:
+  host: 127.0.0.1    # 监听地址，0.0.0.0 表示所有网卡
+  port: 5000         # 监听端口
+  debug: false       # 调试模式
+
+# 认证配置
+auth:
+  enabled: false     # 默认关闭；如需启用，请先修改下面的密钥和账户
+  jwt_secret: "your-secret-key-change-this-in-production"  # JWT 密钥，请修改！
+  token_expiration_hours: 720  # Token 过期时间（小时）
+  users:
+    - username: change-me
+      password: change-me-too
+      hashed: false  # true 表示 password 字段存储的是哈希值
+
+# 功能开关
+features:
+  search: true       # 搜索功能
+  dark_mode: true    # 暗色模式
