@@ -33,6 +33,15 @@ function isImageExtension(ext) {
     return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(ext);
 }
 
+function isHttpUrl(value) {
+    return value && (value.startsWith('http://') || value.startsWith('https://'));
+}
+
+function remoteImageProxyUrl(url) {
+    const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
+    return `/api/remote-image?url=${encodeURIComponent(url)}${tokenParam}`;
+}
+
 // Helper: Simplify path for display
 function simplifyPath(path) {
     const homePrefix = '/home/';
@@ -1063,7 +1072,9 @@ async function loadFile(filePath, fileName) {
         const processImages = (container) => {
             container.querySelectorAll('img').forEach(img => {
                 const originalSrc = img.getAttribute('src');
-                if (originalSrc && !originalSrc.startsWith('http://') && !originalSrc.startsWith('https://') && !originalSrc.startsWith('data:')) {
+                if (isHttpUrl(originalSrc)) {
+                    img.src = remoteImageProxyUrl(originalSrc);
+                } else if (originalSrc && !originalSrc.startsWith('data:')) {
                     const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
                     const absolutePath = fileDir + '/' + originalSrc;
                     const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
@@ -1076,7 +1087,10 @@ async function loadFile(filePath, fileName) {
         const processLinks = (container) => {
             container.querySelectorAll('a').forEach(link => {
                 const href = link.getAttribute('href');
-                if (href && !href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('#') && !href.startsWith('mailto:')) {
+                if (isHttpUrl(href)) {
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                } else if (href && !href.startsWith('#') && !href.startsWith('mailto:')) {
                     const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
                     const absolutePath = resolveRelativePath(fileDir, href);
                     link.addEventListener('click', (e) => {
@@ -2969,7 +2983,9 @@ async function updateEditPreview() {
             // Process images in preview
             el.docPreview.querySelectorAll('img').forEach(img => {
                 const originalSrc = img.getAttribute('src');
-                if (originalSrc && !originalSrc.startsWith('http://') && !originalSrc.startsWith('https://') && !originalSrc.startsWith('data:')) {
+                if (isHttpUrl(originalSrc)) {
+                    img.src = remoteImageProxyUrl(originalSrc);
+                } else if (originalSrc && !originalSrc.startsWith('data:')) {
                     const fileDir = currentPath.substring(0, currentPath.lastIndexOf('/'));
                     const absolutePath = fileDir + '/' + originalSrc;
                     const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';

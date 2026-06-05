@@ -9,12 +9,15 @@ import hashlib
 import jwt
 import html
 import secrets
+import ipaddress
+import socket
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
-from urllib.parse import quote
-from flask import Flask, render_template, jsonify, request
+from urllib.parse import quote, unquote, urlparse
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+from flask import Flask, render_template, jsonify, request, Response
 import markdown
 
 app = Flask(__name__)
@@ -28,6 +31,8 @@ MARKDOWN_EXTENSIONS = [
 ]
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'}
+REMOTE_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+REMOTE_IMAGE_TIMEOUT_SECONDS = 8
 
 # 加载配置
 def load_config():
@@ -159,6 +164,50 @@ def increment_share_view(token):
             return link
     return None
 
+def request_has_valid_auth_or_share():
+    """Allow remote assets for logged-in users or active share pages."""
+    share_token = request.args.get('share_token', '')
+    if share_token:
+        return is_share_link_active(find_share_link(share_token), enforce_view_limit=False)
+
+    if not is_auth_enabled():
+        return True
+
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        token = request.args.get('token', '')
+
+    return decode_token(token) is not None if token else False
+
+def is_public_remote_url(url):
+    """Reject non-http(s), localhost, and private-network targets."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return False
+
+    hostname = parsed.hostname.strip().lower()
+    if hostname in {'localhost'} or hostname.endswith('.localhost'):
+        return False
+
+    try:
+        addresses = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+
+    return True
+
 def preprocess_markdown_content(content):
     """预处理 Markdown 内容，兼容单换行和行首标签。"""
     lines = content.split('\n')
@@ -223,7 +272,14 @@ def rewrite_shared_image_urls(html_content, share_token):
         quote_char = match.group(2)
         src = match.group(3)
 
-        if re.match(r'^(https?:)?//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
+        if src.startswith(('http://', 'https://')):
+            shared_src = (
+                f'/api/remote-image?url={quote(src, safe="")}'
+                f'&share_token={quote(share_token, safe="")}'
+            )
+            return f'{prefix}{quote_char}{shared_src}{quote_char}'
+
+        if re.match(r'^//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
             return match.group(0)
 
         shared_src = f'/api/image?share_token={quote(share_token, safe="")}&src={quote(src, safe="")}'
@@ -1070,6 +1126,45 @@ def api_image():
         return send_file(str(image_path))
     except Exception as e:
         abort(500)
+
+@app.route('/api/remote-image')
+def api_remote_image():
+    """Proxy remote images through this server to avoid browser-side cross-origin failures."""
+    if not request_has_valid_auth_or_share():
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    remote_url = request.args.get('url', '')
+    if not remote_url:
+        return jsonify({'error': '缺少图片 URL'}), 400
+
+    remote_url = unquote(remote_url)
+    if not is_public_remote_url(remote_url):
+        return jsonify({'error': '不允许代理该 URL'}), 400
+
+    req = Request(
+        remote_url,
+        headers={
+            'User-Agent': 'Mozilla/5.0 DocReader/1.0',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+        }
+    )
+
+    try:
+        opener = build_opener(HTTPRedirectHandler)
+        with opener.open(req, timeout=REMOTE_IMAGE_TIMEOUT_SECONDS) as remote:
+            content_type = remote.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+            if not content_type.startswith('image/'):
+                return jsonify({'error': '远程资源不是图片'}), 415
+
+            data = remote.read(REMOTE_IMAGE_MAX_BYTES + 1)
+            if len(data) > REMOTE_IMAGE_MAX_BYTES:
+                return jsonify({'error': '远程图片过大'}), 413
+
+        response = Response(data, mimetype=content_type)
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        return response
+    except Exception:
+        return jsonify({'error': '远程图片加载失败'}), 502
 
 if __name__ == '__main__':
     server_config = config.get('server', {})
