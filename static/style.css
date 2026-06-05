@@ -516,6 +516,10 @@ a:hover {
     outline-offset: 2px;
 }
 
+#shareBtn:disabled {
+    display: none;
+}
+
 #expandSidebar {
     display: none;
 }
@@ -1459,6 +1463,31 @@ a:hover {
     cursor: not-allowed;
 }
 
+.primary-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: var(--text-primary);
+    color: var(--bg-primary);
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity var(--transition);
+}
+
+.primary-btn:hover {
+    opacity: 0.9;
+}
+
+.primary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .login-loading svg {
     animation: spin 1s linear infinite;
 }
@@ -1487,6 +1516,175 @@ a:hover {
 
 #authBtn.authenticated .auth-label { display: none; }
 #authBtn.authenticated .auth-username { display: block; }
+
+/* ========================================
+   Share Modal
+   ======================================== */
+
+.share-modal-content {
+    max-width: 560px;
+}
+
+.share-body {
+    padding: 16px;
+}
+
+.share-current-file {
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.share-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+}
+
+.share-controls .form-group {
+    margin-bottom: 14px;
+}
+
+.share-controls select,
+.share-controls input {
+    width: 100%;
+    margin-top: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    font-size: 14px;
+}
+
+.share-links {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.share-empty {
+    padding: 18px 12px;
+    text-align: center;
+    color: var(--text-tertiary);
+    font-size: 13px;
+}
+
+.share-link-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-primary);
+}
+
+.share-link-item.inactive {
+    opacity: 0.62;
+}
+
+.share-link-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.share-link-url {
+    color: var(--text-primary);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.share-link-meta {
+    margin-top: 3px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+}
+
+.share-link-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.icon-btn {
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    transition: background var(--transition), color var(--transition);
+}
+
+.icon-btn:hover {
+    background: var(--bg-hover);
+}
+
+.icon-btn.danger:hover {
+    color: #e03131;
+    background: rgba(224, 49, 49, 0.1);
+}
+
+/* ========================================
+   Public Share Page
+   ======================================== */
+
+.share-page {
+    background: var(--bg-primary);
+}
+
+.share-shell {
+    width: 100%;
+    min-height: 100vh;
+}
+
+.share-document {
+    display: block;
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: 72px 24px 96px;
+}
+
+body.share-page .share-title {
+    display: block !important;
+}
+
+.share-content {
+    display: block;
+}
+
+.share-expires {
+    display: inline-block;
+    margin-left: 10px;
+}
+
+.share-error {
+    max-width: 560px;
+    margin: 20vh auto 0;
+    padding: 0 24px;
+    text-align: center;
+}
+
+.share-error h1 {
+    margin-bottom: 12px;
+    color: var(--text-primary);
+    font-size: 28px;
+}
+
+.share-error p {
+    color: var(--text-secondary);
+}
 
 @media (prefers-color-scheme: dark) {
     .login-error {

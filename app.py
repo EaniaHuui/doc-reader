@@ -8,9 +8,12 @@ import yaml
 import hashlib
 import jwt
 import html
+import secrets
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
+from urllib.parse import quote
 from flask import Flask, render_template, jsonify, request
 import markdown
 
@@ -34,6 +37,7 @@ config = load_config()
 
 # 目录配置文件路径
 DIRECTORIES_FILE = Path(__file__).parent / 'directories.json'
+SHARE_LINKS_FILE = Path(__file__).parent / 'share_links.json'
 
 def load_directories_config():
     """加载目录配置，优先从 directories.json，否则从 config.yaml"""
@@ -77,6 +81,81 @@ def is_path_in_directories(target_path, directories=None):
             continue
 
     return False
+
+def serialize_datetime(value):
+    """Return an ISO timestamp string in UTC."""
+    return value.replace(microsecond=0).isoformat() + 'Z'
+
+def parse_datetime(value):
+    """Parse an ISO timestamp string produced by serialize_datetime."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+def load_share_links():
+    """Load share-link metadata from local JSON storage."""
+    if not SHARE_LINKS_FILE.exists():
+        return []
+
+    try:
+        with open(SHARE_LINKS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def save_share_links(links):
+    """Persist share-link metadata to local JSON storage."""
+    with open(SHARE_LINKS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(links, f, ensure_ascii=False, indent=2)
+
+def public_share_data(link):
+    """Return non-sensitive share-link fields for API responses."""
+    result = deepcopy(link)
+    result.pop('token', None)
+    result['url'] = request.host_url.rstrip('/') + f'/share/{link["token"]}'
+    result['active'] = is_share_link_active(link)
+    return result
+
+def find_share_link(token):
+    """Find a share link by token."""
+    for link in load_share_links():
+        if link.get('token') == token:
+            return link
+    return None
+
+def is_share_link_active(link, enforce_view_limit=True):
+    """Check whether a share link is usable."""
+    if not link or link.get('revoked_at'):
+        return False
+
+    expires_at = parse_datetime(link.get('expires_at'))
+    if expires_at and expires_at < datetime.utcnow():
+        return False
+
+    max_views = link.get('max_views')
+    if enforce_view_limit and max_views is not None and link.get('view_count', 0) >= max_views:
+        return False
+
+    file_path = expand_path(link.get('path', ''))
+    if not is_path_in_directories(file_path):
+        return False
+
+    return file_path.exists() and file_path.is_file()
+
+def increment_share_view(token):
+    """Increment view count for a share link."""
+    links = load_share_links()
+    for link in links:
+        if link.get('token') == token:
+            link['view_count'] = link.get('view_count', 0) + 1
+            link['last_viewed_at'] = serialize_datetime(datetime.utcnow())
+            save_share_links(links)
+            return link
+    return None
 
 def preprocess_markdown_content(content):
     """预处理 Markdown 内容，兼容单换行和行首标签。"""
@@ -134,6 +213,21 @@ def render_markdown(content):
     md = markdown.Markdown(extensions=MARKDOWN_EXTENSIONS)
     html_content = md.convert(processed_content)
     return fix_tag_headings(html_content)
+
+def rewrite_shared_image_urls(html_content, share_token):
+    """Rewrite relative image URLs so shared pages can load them read-only."""
+    def replace_src(match):
+        prefix = match.group(1)
+        quote_char = match.group(2)
+        src = match.group(3)
+
+        if re.match(r'^(https?:)?//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
+            return match.group(0)
+
+        shared_src = f'/api/image?share_token={quote(share_token, safe="")}&src={quote(src, safe="")}'
+        return f'{prefix}{quote_char}{shared_src}{quote_char}'
+
+    return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
 
 # ========================================
 # Authentication Functions
@@ -391,6 +485,129 @@ def api_auth_logout():
 def index():
     return render_template('index.html', config=config)
 
+@app.route('/share/<token>')
+def share_page(token):
+    """Render a public, read-only document from a share token."""
+    link = find_share_link(token)
+    if not is_share_link_active(link):
+        return render_template(
+            'share.html',
+            error='这个分享链接不存在、已过期或已被撤销。'
+        ), 404
+
+    file_path = expand_path(link['path'])
+    file_ext = file_path.suffix.lower()
+
+    if file_ext == '.md':
+        data, error = read_markdown_file(file_path)
+    elif file_ext in ['.txt', '.json']:
+        data, error = read_text_file(file_path, file_ext)
+    else:
+        data, error = None, '不支持的文件类型'
+
+    if error:
+        return render_template('share.html', error=error), 404
+
+    increment_share_view(token)
+
+    if data.get('content'):
+        data['content'] = rewrite_shared_image_urls(data['content'], token)
+
+    return render_template(
+        'share.html',
+        document=data,
+        expires_at=link.get('expires_at')
+    )
+
+@app.route('/api/share-links', methods=['GET', 'POST'])
+@login_required
+def api_share_links():
+    """List or create share links for one file."""
+    if request.method == 'GET':
+        file_path = request.args.get('path')
+        links = load_share_links()
+
+        if file_path:
+            file_path = str(expand_path(file_path))
+            links = [link for link in links if str(expand_path(link.get('path', ''))) == file_path]
+
+        return jsonify([public_share_data(link) for link in links])
+
+    data = request.get_json() or {}
+    file_path = data.get('path')
+    expires_in_hours = data.get('expires_in_hours', 24)
+    max_views = data.get('max_views')
+
+    if not file_path:
+        return jsonify({'error': '缺少文件路径'}), 400
+
+    try:
+        expires_in_hours = int(expires_in_hours)
+    except (TypeError, ValueError):
+        return jsonify({'error': '有效期必须是数字'}), 400
+
+    if expires_in_hours <= 0 or expires_in_hours > 24 * 365:
+        return jsonify({'error': '有效期必须在 1 小时到 365 天之间'}), 400
+
+    if max_views in ('', None):
+        max_views = None
+    else:
+        try:
+            max_views = int(max_views)
+        except (TypeError, ValueError):
+            return jsonify({'error': '访问次数必须是数字'}), 400
+        if max_views <= 0 or max_views > 100000:
+            return jsonify({'error': '访问次数必须在 1 到 100000 之间'}), 400
+
+    file_path = expand_path(file_path)
+
+    if not is_path_in_directories(file_path):
+        return jsonify({'error': '无权限分享该文件'}), 403
+
+    if not file_path.exists() or not file_path.is_file():
+        return jsonify({'error': '文件不存在'}), 404
+
+    if file_path.suffix.lower() not in ['.md', '.txt', '.json']:
+        return jsonify({'error': '不支持分享该文件类型'}), 400
+
+    now = datetime.utcnow()
+    link = {
+        'id': secrets.token_urlsafe(12),
+        'token': secrets.token_urlsafe(32),
+        'path': str(file_path),
+        'display_path': simplify_path(file_path),
+        'title': file_path.name,
+        'permission': 'read',
+        'expires_at': serialize_datetime(now + timedelta(hours=expires_in_hours)),
+        'created_at': serialize_datetime(now),
+        'created_by': getattr(request, 'user', {}).get('username', 'local'),
+        'revoked_at': None,
+        'max_views': max_views,
+        'view_count': 0,
+        'last_viewed_at': None
+    }
+
+    links = load_share_links()
+    links.append(link)
+    save_share_links(links)
+
+    return jsonify(public_share_data(link)), 201
+
+@app.route('/api/share-links/<link_id>', methods=['DELETE'])
+@login_required
+def api_revoke_share_link(link_id):
+    """Revoke a share link."""
+    links = load_share_links()
+
+    for link in links:
+        if link.get('id') == link_id:
+            if not link.get('revoked_at'):
+                link['revoked_at'] = serialize_datetime(datetime.utcnow())
+                save_share_links(links)
+            return jsonify({'success': True, 'link': public_share_data(link)})
+
+    return jsonify({'error': '分享链接不存在'}), 404
+
 @app.route('/api/directories')
 @login_required
 def api_directories():
@@ -553,7 +770,11 @@ def api_file():
         return jsonify({'error': '缺少文件路径'}), 400
 
     # 展开路径（支持 ~ 符号）
-    file_path = str(expand_path(file_path))
+    file_path = expand_path(file_path)
+
+    # 验证文件路径在允许的目录内
+    if not is_path_in_directories(file_path):
+        return jsonify({'error': '无权限访问该文件'}), 403
 
     # 判断文件类型
     file_ext = Path(file_path).suffix.lower()
@@ -744,8 +965,22 @@ def api_update_directories_config():
 @app.route('/api/image')
 def api_image():
     """Serve image files from the configured directories."""
-    # Check authentication (support both header and URL parameter for img tags)
-    if is_auth_enabled():
+    share_token = request.args.get('share_token', '')
+    share_src = request.args.get('src', '')
+
+    if share_token:
+        link = find_share_link(share_token)
+        if not is_share_link_active(link, enforce_view_limit=False):
+            return jsonify({'error': 'Invalid or expired share token'}), 401
+
+        base_path = expand_path(link['path']).parent
+        image_path = (base_path / share_src).resolve()
+
+        try:
+            image_path.relative_to(base_path)
+        except ValueError:
+            return jsonify({'error': 'Invalid image path'}), 403
+    elif is_auth_enabled():
         token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if not token:
             token = request.args.get('token', '')
@@ -757,14 +992,19 @@ def api_image():
         if payload is None:
             return jsonify({'error': 'Invalid or expired token'}), 401
 
-    image_path = request.args.get('path')
-    if not image_path:
-        return jsonify({'error': '缺少文件路径'}), 400
+        image_path = request.args.get('path')
+        if not image_path:
+            return jsonify({'error': '缺少文件路径'}), 400
+
+        image_path = expand_path(image_path)
+    else:
+        image_path = request.args.get('path')
+        if not image_path:
+            return jsonify({'error': '缺少文件路径'}), 400
+
+        image_path = expand_path(image_path)
 
     from flask import send_file, abort
-    import os
-
-    image_path = expand_path(image_path)
 
     # 验证路径是否在配置的目录内
     if not is_path_in_directories(image_path):

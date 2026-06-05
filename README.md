@@ -15,6 +15,7 @@
 - 🔍 **文档搜索** - 快速全文搜索
 - 🌙 **暗色模式** - 支持亮色/暗色主题切换
 - 🔐 **JWT 认证** - 可选的用户认证系统
+- 🔗 **只读分享链接** - 为单个文档生成可过期、可撤销、可限制访问次数的公开链接
 - 🔗 **内部链接** - 支持 Markdown 文档间跳转
 - 📋 **目录导航** - 自动生成文章目录
 - ⌨️ **快捷键** - Cmd+K 搜索，Cmd+\ 切换侧边栏
@@ -136,6 +137,7 @@ features:
 
 - `config.yaml` 仅用于本地运行，不应提交到公开仓库。
 - `directories.json` 会保存你本地添加过的目录列表，也不应提交。
+- `share_links.json` 会保存公开分享令牌，也不应提交。
 - 运行日志如 `server.log` 可能包含本地路径和访问记录，不应提交。
 - `docs/brainstorms/` 与 `docs/plans/` 如包含内部工作草稿，公开前建议移出仓库或单独整理后再发布。
 - 建议公开仓库时仅保留 `config.yaml.example` 作为示例配置。
@@ -154,6 +156,7 @@ features:
 doc-reader/
 ├── app.py              # Flask 主程序
 ├── config.yaml         # 本地配置文件（不要提交）
+├── share_links.json    # 分享链接本地存储（自动生成，不要提交）
 ├── requirements.txt    # Python 依赖
 ├── install.sh          # 一键安装脚本
 ├── start.sh            # 启动脚本

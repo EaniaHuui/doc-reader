@@ -44,6 +44,7 @@ logs/
 # Project specific
 config.yaml
 directories.json
+share_links.json
 server.log
 docs/brainstorms/
 docs/plans/

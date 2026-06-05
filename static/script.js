@@ -16,6 +16,7 @@ let showJsonFiles = false;          // Whether to show .json files
 let allExpanded = false;            // Whether all directories are expanded
 let sourceViewMode = 'normal';      // 'normal', 'source', 'split'
 let isEditMode = false;             // Edit mode state
+let shareLinksCache = [];
 
 // Document search state
 let docSearchMatches = [];          // Array of match elements
@@ -111,6 +112,15 @@ const el = {
     loginBtn: $('loginBtn'),
     loginError: $('loginError'),
     refreshBtn: $('refreshBtn'),
+    shareBtn: $('shareBtn'),
+    shareModal: $('shareModal'),
+    closeShare: $('closeShare'),
+    shareCurrentFile: $('shareCurrentFile'),
+    shareExpiry: $('shareExpiry'),
+    shareMaxViews: $('shareMaxViews'),
+    createShareBtn: $('createShareBtn'),
+    shareLinks: $('shareLinks'),
+    shareError: $('shareError'),
     // Delete elements
     deleteBtn: $('deleteBtn'),
     deleteConfirmModal: $('deleteConfirmModal'),
@@ -233,6 +243,12 @@ function setupEventListeners() {
     el.deleteConfirmModal.querySelector('.modal-backdrop').addEventListener('click', closeDeleteConfirm);
     el.closeDeleteConfirm.addEventListener('click', closeDeleteConfirm);
     el.deleteConfirmBtn.addEventListener('click', confirmDelete);
+
+    // Share
+    el.shareBtn.addEventListener('click', openShareModal);
+    el.closeShare.addEventListener('click', closeShareModal);
+    el.shareModal.querySelector('.modal-backdrop').addEventListener('click', closeShareModal);
+    el.createShareBtn.addEventListener('click', createShareLink);
 
     // Delete directory
     el.deleteDirCancelBtn.addEventListener('click', closeDeleteDirConfirm);
@@ -1002,6 +1018,7 @@ async function loadFile(filePath, fileName) {
 
         // Enable delete button
         el.deleteBtn.disabled = false;
+        el.shareBtn.disabled = false;
 
         el.docTitle.textContent = data.title;
         el.docPath.textContent = simplifyPath(data.path);
@@ -1628,6 +1645,7 @@ function goHome() {
 
     // Disable delete button
     el.deleteBtn.disabled = true;
+    el.shareBtn.disabled = true;
 
     // Clear URL file parameter
     const newUrl = new URL(window.location);
@@ -1793,11 +1811,14 @@ function toggleTheme() {
 
 function copyPath() {
     if (!currentPath) return;
+    copyText(currentPath, 'Path copied');
+}
 
+function copyText(text, successMessage = 'Copied') {
     // Check if Clipboard API is available
     if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(currentPath).then(() => {
-            showToast('Path copied');
+        navigator.clipboard.writeText(text).then(() => {
+            showToast(successMessage);
         }).catch(() => {
             // Fallback if Clipboard API fails
             fallbackCopy();
@@ -1809,18 +1830,189 @@ function copyPath() {
 
     function fallbackCopy() {
         const textarea = document.createElement('textarea');
-        textarea.value = currentPath;
+        textarea.value = text;
         textarea.style.cssText = 'position:fixed;opacity:0';
         document.body.appendChild(textarea);
         textarea.select();
         try {
             document.execCommand('copy');
-            showToast('Path copied');
+            showToast(successMessage);
         } catch (err) {
             showToast('Copy failed');
         }
         document.body.removeChild(textarea);
     }
+}
+
+// ========================================
+// Share Links
+// ========================================
+
+async function openShareModal() {
+    if (!currentPath) return;
+
+    el.shareError.style.display = 'none';
+    el.shareError.textContent = '';
+    el.shareCurrentFile.textContent = simplifyPath(currentPath);
+    el.shareModal.classList.add('visible');
+    await loadShareLinks();
+}
+
+function closeShareModal() {
+    el.shareModal.classList.remove('visible');
+}
+
+async function loadShareLinks() {
+    if (!currentPath) return;
+
+    el.shareLinks.innerHTML = '<div class="share-empty">Loading...</div>';
+
+    try {
+        const response = await authFetch(`/api/share-links?path=${encodeURIComponent(currentPath)}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load share links');
+        }
+
+        shareLinksCache = data;
+        renderShareLinks();
+    } catch (error) {
+        console.error('Failed to load share links:', error);
+        el.shareLinks.innerHTML = '<div class="share-empty">Failed to load share links</div>';
+    }
+}
+
+async function createShareLink() {
+    if (!currentPath) return;
+
+    el.shareError.style.display = 'none';
+    el.createShareBtn.disabled = true;
+    el.createShareBtn.textContent = 'Generating...';
+
+    const payload = {
+        path: currentPath,
+        expires_in_hours: Number(el.shareExpiry.value),
+        max_views: el.shareMaxViews.value ? Number(el.shareMaxViews.value) : null
+    };
+
+    try {
+        const response = await authFetch('/api/share-links', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            el.shareError.textContent = data.error || 'Failed to create share link';
+            el.shareError.style.display = 'block';
+            return;
+        }
+
+        shareLinksCache.unshift(data);
+        renderShareLinks();
+        copyText(data.url, 'Share link copied');
+    } catch (error) {
+        console.error('Failed to create share link:', error);
+        el.shareError.textContent = 'Failed to create share link';
+        el.shareError.style.display = 'block';
+    } finally {
+        el.createShareBtn.disabled = false;
+        el.createShareBtn.textContent = '生成只读分享链接';
+    }
+}
+
+function renderShareLinks() {
+    if (!shareLinksCache.length) {
+        el.shareLinks.innerHTML = '<div class="share-empty">还没有分享链接</div>';
+        return;
+    }
+
+    el.shareLinks.innerHTML = '';
+    shareLinksCache.forEach(link => {
+        const item = document.createElement('div');
+        item.className = `share-link-item${link.active ? '' : ' inactive'}`;
+
+        const info = document.createElement('div');
+        info.className = 'share-link-info';
+
+        const url = document.createElement('div');
+        url.className = 'share-link-url';
+        url.textContent = link.url;
+
+        const meta = document.createElement('div');
+        meta.className = 'share-link-meta';
+        const viewsText = link.max_views ? `${link.view_count}/${link.max_views} views` : `${link.view_count} views`;
+        const statusText = link.active ? 'Active' : 'Inactive';
+        meta.textContent = `${statusText} · expires ${formatShareTime(link.expires_at)} · ${viewsText}`;
+
+        info.appendChild(url);
+        info.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'share-link-actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'icon-btn';
+        copyBtn.title = 'Copy share link';
+        copyBtn.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+        `;
+        copyBtn.addEventListener('click', () => copyText(link.url, 'Share link copied'));
+        actions.appendChild(copyBtn);
+
+        if (link.active) {
+            const revokeBtn = document.createElement('button');
+            revokeBtn.className = 'icon-btn danger';
+            revokeBtn.title = 'Revoke share link';
+            revokeBtn.innerHTML = `
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+            `;
+            revokeBtn.addEventListener('click', () => revokeShareLink(link.id));
+            actions.appendChild(revokeBtn);
+        }
+
+        item.appendChild(info);
+        item.appendChild(actions);
+        el.shareLinks.appendChild(item);
+    });
+}
+
+async function revokeShareLink(linkId) {
+    try {
+        const response = await authFetch(`/api/share-links/${encodeURIComponent(linkId)}`, {
+            method: 'DELETE'
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            showToast(data.error || 'Failed to revoke share link');
+            return;
+        }
+
+        shareLinksCache = shareLinksCache.map(link => link.id === linkId ? data.link : link);
+        renderShareLinks();
+        showToast('Share link revoked');
+    } catch (error) {
+        console.error('Failed to revoke share link:', error);
+        showToast('Failed to revoke share link');
+    }
+}
+
+function formatShareTime(value) {
+    if (!value) return 'never';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString();
 }
 
 // ========================================
@@ -2364,6 +2556,7 @@ async function confirmDelete() {
 
             // Disable delete button
             el.deleteBtn.disabled = true;
+            el.shareBtn.disabled = true;
 
         } else {
             showToast(data.error || 'Failed to delete file');
