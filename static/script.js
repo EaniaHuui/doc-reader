@@ -13,6 +13,7 @@ let isResizing = false;
 let showEmptyDirectories = false;  // Whether to show empty directories
 let showTxtFiles = false;           // Whether to show .txt files
 let showJsonFiles = false;          // Whether to show .json files
+let showImageFiles = false;         // Whether to show image files
 let allExpanded = false;            // Whether all directories are expanded
 let sourceViewMode = 'normal';      // 'normal', 'source', 'split'
 let isEditMode = false;             // Edit mode state
@@ -26,6 +27,10 @@ let docSearchHighlightSpans = [];   // Array of highlight spans
 
 function isTouchInteractionMode() {
     return window.innerWidth <= 768 || window.matchMedia('(hover: none), (pointer: coarse)').matches;
+}
+
+function isImageExtension(ext) {
+    return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(ext);
 }
 
 // Helper: Simplify path for display
@@ -59,6 +64,7 @@ const el = {
     treeFilterBtn: $('treeFilterBtn'),
     txtFilterBtn: $('txtFilterBtn'),
     jsonFilterBtn: $('jsonFilterBtn'),
+    imageFilterBtn: $('imageFilterBtn'),
     expandAllBtn: $('expandAllBtn'),
     welcome: $('welcome'),
     document: $('document'),
@@ -301,6 +307,7 @@ function setupEventListeners() {
     el.treeFilterBtn.addEventListener('click', toggleTreeFilter);
     el.txtFilterBtn.addEventListener('click', toggleTxtFilter);
     el.jsonFilterBtn.addEventListener('click', toggleJsonFilter);
+    el.imageFilterBtn.addEventListener('click', toggleImageFilter);
     el.expandAllBtn.addEventListener('click', toggleExpandAll);
 
     // Copy path
@@ -582,6 +589,7 @@ async function loadDirectories() {
         const params = new URLSearchParams();
         if (showTxtFiles) params.append('txt', 'true');
         if (showJsonFiles) params.append('json', 'true');
+        if (showImageFiles) params.append('images', 'true');
 
         const url = `/api/directories${params.toString() ? '?' + params.toString() : ''}`;
         const response = await authFetch(url);
@@ -717,6 +725,15 @@ function renderTree(node, level) {
                     <path d="M14 12h1"/>
                     <path d="M10 16h1"/>
                     <path d="M14 16h1"/>
+                </svg>
+            `;
+        } else if (isImageExtension(ext)) {
+            // Image file icon
+            icon.innerHTML = `
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                    <path d="M21 15l-5-5L5 21"/>
                 </svg>
             `;
         }
@@ -989,15 +1006,19 @@ async function loadFile(filePath, fileName) {
             return;
         }
 
+        const isImageFile = data.fileType === 'image';
+
         // Store raw content for source view
-        currentRawContent = data.raw || '';
+        currentRawContent = data.raw ?? null;
 
         // Restore source view mode from localStorage
-        const savedViewMode = localStorage.getItem('sourceViewMode') || 'normal';
+        const savedViewMode = isImageFile ? 'normal' : (localStorage.getItem('sourceViewMode') || 'normal');
         sourceViewMode = savedViewMode;
         el.document.classList.remove('split-mode', 'source-mode');
         el.main.classList.remove('split-mode', 'source-mode');
         el.sourceToggle.classList.remove('active');
+        el.document.classList.toggle('image-mode', isImageFile);
+        el.topbar.classList.toggle('image-mode', isImageFile);
 
         if (savedViewMode === 'split') {
             el.document.classList.add('split-mode');
@@ -1032,10 +1053,10 @@ async function loadFile(filePath, fileName) {
 
         // Update source view content
         if (el.docSource) {
-            el.docSource.textContent = currentRawContent;
+            el.docSource.textContent = currentRawContent || '';
         }
         if (el.docSourceSingle) {
-            el.docSourceSingle.textContent = currentRawContent;
+            el.docSourceSingle.textContent = currentRawContent || '';
         }
 
         // Helper function to process images
@@ -1415,6 +1436,8 @@ async function loadFile(filePath, fileName) {
 function showError(message) {
     el.welcome.style.display = 'none';
     el.document.style.display = 'block';
+    el.document.classList.remove('image-mode');
+    el.topbar.classList.remove('image-mode');
 
     el.docTitle.textContent = 'Error';
     el.docPath.textContent = '';
@@ -1640,7 +1663,8 @@ function goHome() {
 
     // Reset source view mode
     sourceViewMode = 'normal';
-    el.document.classList.remove('split-mode', 'source-mode');
+    el.document.classList.remove('split-mode', 'source-mode', 'image-mode');
+    el.topbar.classList.remove('image-mode');
     el.sourceToggle.classList.remove('active');
 
     // Disable delete button
@@ -2235,8 +2259,10 @@ function updateTreeFilterButton() {
 function initFileFilters() {
     const savedTxt = localStorage.getItem('showTxtFiles');
     const savedJson = localStorage.getItem('showJsonFiles');
+    const savedImages = localStorage.getItem('showImageFiles');
     showTxtFiles = savedTxt === 'true';
     showJsonFiles = savedJson === 'true';
+    showImageFiles = savedImages === 'true';
     updateFileFilterButtons();
 }
 
@@ -2254,6 +2280,13 @@ function toggleJsonFilter() {
     loadDirectories();
 }
 
+function toggleImageFilter() {
+    showImageFiles = !showImageFiles;
+    localStorage.setItem('showImageFiles', showImageFiles);
+    updateFileFilterButtons();
+    loadDirectories();
+}
+
 function updateFileFilterButtons() {
     // Update TXT button
     if (showTxtFiles) {
@@ -2267,6 +2300,13 @@ function updateFileFilterButtons() {
         el.jsonFilterBtn.classList.add('active');
     } else {
         el.jsonFilterBtn.classList.remove('active');
+    }
+
+    // Update image button
+    if (showImageFiles) {
+        el.imageFilterBtn.classList.add('active');
+    } else {
+        el.imageFilterBtn.classList.remove('active');
     }
 }
 

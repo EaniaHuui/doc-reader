@@ -27,6 +27,8 @@ MARKDOWN_EXTENSIONS = [
     'fenced_code',
 ]
 
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'}
+
 # 加载配置
 def load_config():
     config_path = Path(__file__).parent / 'config.yaml'
@@ -228,6 +230,37 @@ def rewrite_shared_image_urls(html_content, share_token):
         return f'{prefix}{quote_char}{shared_src}{quote_char}'
 
     return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
+
+def render_image_file(file_path):
+    """Return a read-only image preview payload."""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        return None, "文件不存在"
+
+    if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
+        return None, "不支持的图片类型"
+
+    try:
+        mtime = file_path.stat().st_mtime
+        modified_time = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+        image_url = '/api/image?path=' + quote(str(file_path), safe='')
+        escaped_name = html.escape(file_path.name)
+
+        return {
+            'title': file_path.name,
+            'content': (
+                '<div class="image-file-viewer">'
+                f'<img src="{image_url}" alt="{escaped_name}">'
+                '</div>'
+            ),
+            'raw': None,
+            'fileType': 'image',
+            'path': simplify_path(file_path),
+            'size': file_path.stat().st_size,
+            'modified': modified_time
+        }, None
+    except Exception as e:
+        return None, str(e)
 
 # ========================================
 # Authentication Functions
@@ -502,6 +535,8 @@ def share_page(token):
         data, error = read_markdown_file(file_path)
     elif file_ext in ['.txt', '.json']:
         data, error = read_text_file(file_path, file_ext)
+    elif file_ext in IMAGE_EXTENSIONS:
+        data, error = render_image_file(file_path)
     else:
         data, error = None, '不支持的文件类型'
 
@@ -511,7 +546,16 @@ def share_page(token):
     increment_share_view(token)
 
     if data.get('content'):
-        data['content'] = rewrite_shared_image_urls(data['content'], token)
+        if data.get('fileType') == 'image':
+            escaped_name = html.escape(file_path.name)
+            image_url = f'/api/image?share_token={quote(token, safe="")}&src={quote(file_path.name, safe="")}'
+            data['content'] = (
+                '<div class="image-file-viewer">'
+                f'<img src="{image_url}" alt="{escaped_name}">'
+                '</div>'
+            )
+        else:
+            data['content'] = rewrite_shared_image_urls(data['content'], token)
 
     return render_template(
         'share.html',
@@ -567,7 +611,7 @@ def api_share_links():
     if not file_path.exists() or not file_path.is_file():
         return jsonify({'error': '文件不存在'}), 404
 
-    if file_path.suffix.lower() not in ['.md', '.txt', '.json']:
+    if file_path.suffix.lower() not in ['.md', '.txt', '.json', *IMAGE_EXTENSIONS]:
         return jsonify({'error': '不支持分享该文件类型'}), 400
 
     now = datetime.utcnow()
@@ -615,11 +659,14 @@ def api_directories():
     file_types = ['.md']  # 默认只显示md文件
     show_txt = request.args.get('txt', 'false').lower() == 'true'
     show_json = request.args.get('json', 'false').lower() == 'true'
+    show_images = request.args.get('images', 'false').lower() == 'true'
 
     if show_txt:
         file_types.append('.txt')
     if show_json:
         file_types.append('.json')
+    if show_images:
+        file_types.extend(sorted(IMAGE_EXTENSIONS))
 
     trees = []
     for directory in load_directories_config():
@@ -783,6 +830,8 @@ def api_file():
         data, error = read_markdown_file(file_path)
     elif file_ext in ['.txt', '.json']:
         data, error = read_text_file(file_path, file_ext)
+    elif file_ext in IMAGE_EXTENSIONS:
+        data, error = render_image_file(file_path)
     else:
         data, error = None, "不支持的文件类型"
 
@@ -1014,8 +1063,7 @@ def api_image():
         abort(404)
 
     # 检查文件扩展名
-    allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'}
-    if image_path.suffix.lower() not in allowed_extensions:
+    if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
         abort(403)
 
     try:

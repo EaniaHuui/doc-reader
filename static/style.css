@@ -944,6 +944,22 @@ a:hover {
     transform: scale(1.02);
 }
 
+.image-file-viewer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: min(70vh, 720px);
+    padding: 24px 0;
+}
+
+.image-file-viewer img {
+    max-width: 100%;
+    max-height: calc(100vh - 180px);
+    object-fit: contain;
+    border-radius: var(--radius-md);
+    cursor: zoom-in;
+}
+
 /* ========================================
    Image Grid (9-grid style like WeChat/Weibo)
    ======================================== */
@@ -2290,6 +2306,12 @@ body.share-page .share-title {
 #sourceToggle.active {
     color: var(--accent);
     background: var(--accent-light);
+}
+
+.topbar.image-mode #sourceToggle,
+.topbar.image-mode #tocToggle,
+.topbar.image-mode #editBtn {
+    display: none !important;
 }
 
 /* Document split view container */
