@@ -712,10 +712,10 @@ def api_revoke_share_link(link_id):
 @login_required
 def api_directories():
     # 获取文件类型参数
-    file_types = ['.md']  # 默认只显示md文件
+    file_types = ['.md']  # 默认显示文档和图片
     show_txt = request.args.get('txt', 'false').lower() == 'true'
     show_json = request.args.get('json', 'false').lower() == 'true'
-    show_images = request.args.get('images', 'false').lower() == 'true'
+    show_images = request.args.get('images', 'true').lower() == 'true'
 
     if show_txt:
         file_types.append('.txt')

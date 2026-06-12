@@ -13,7 +13,7 @@ let isResizing = false;
 let showEmptyDirectories = false;  // Whether to show empty directories
 let showTxtFiles = false;           // Whether to show .txt files
 let showJsonFiles = false;          // Whether to show .json files
-let showImageFiles = false;         // Whether to show image files
+let showImageFiles = true;          // Whether to show image files
 let allExpanded = false;            // Whether all directories are expanded
 let sourceViewMode = 'normal';      // 'normal', 'source', 'split'
 let isEditMode = false;             // Edit mode state
@@ -598,7 +598,7 @@ async function loadDirectories() {
         const params = new URLSearchParams();
         if (showTxtFiles) params.append('txt', 'true');
         if (showJsonFiles) params.append('json', 'true');
-        if (showImageFiles) params.append('images', 'true');
+        if (!showImageFiles) params.append('images', 'false');
 
         const url = `/api/directories${params.toString() ? '?' + params.toString() : ''}`;
         const response = await authFetch(url);
@@ -2276,7 +2276,7 @@ function initFileFilters() {
     const savedImages = localStorage.getItem('showImageFiles');
     showTxtFiles = savedTxt === 'true';
     showJsonFiles = savedJson === 'true';
-    showImageFiles = savedImages === 'true';
+    showImageFiles = savedImages === null ? true : savedImages === 'true';
     updateFileFilterButtons();
 }
 
@@ -2319,8 +2319,10 @@ function updateFileFilterButtons() {
     // Update image button
     if (showImageFiles) {
         el.imageFilterBtn.classList.add('active');
+        el.imageFilterBtn.title = 'Hide image files';
     } else {
         el.imageFilterBtn.classList.remove('active');
+        el.imageFilterBtn.title = 'Show image files';
     }
 }
 
