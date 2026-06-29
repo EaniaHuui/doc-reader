@@ -29,3 +29,24 @@ auth:
 features:
   search: true       # 搜索功能
   dark_mode: true    # 暗色模式
+
+# 文章 AI 配图配置
+illustrator:
+  enabled: true
+  text_provider: openai-compatible      # openai-compatible / mock
+  text_model: gpt-4.1-mini
+  text_base_url: https://api.openai.com/v1
+  text_api_key_env: OPENAI_API_KEY
+  image_provider: openai-compatible     # openai-compatible / custom-command / mock
+  image_model: gpt-image-1
+  image_base_url: https://api.openai.com/v1
+  image_api_key_env: OPENAI_API_KEY
+  image_size: 1536x1024
+  image_quality: auto
+  custom_image_command: ""              # 使用 custom-command 时读取 PROMPT_FILE 并写入 OUTPUT_FILE
+  default_preset: hand-drawn-edu
+  default_density: balanced             # minimal / balanced / per-section / rich
+  default_output_dir: imgs-subdir        # imgs-subdir / same-dir / illustrations-subdir / independent
+  batch_size: 2
+  timeout_seconds: 120
+  retry_count: 1
