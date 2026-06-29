@@ -18,6 +18,11 @@ let allExpanded = false;            // Whether all directories are expanded
 let sourceViewMode = 'normal';      // 'normal', 'source', 'split'
 let isEditMode = false;             // Edit mode state
 let shareLinksCache = [];
+let aiSettingsCache = null;
+let illustratorAnalysisCache = null;
+let illustratorJobId = null;
+let illustratorPollTimer = null;
+let directoryOptionsCache = [];
 
 // Document search state
 let docSearchMatches = [];          // Array of match elements
@@ -151,6 +156,16 @@ const el = {
     deleteDirConfirmBtn: $('deleteDirConfirmBtn'),
     deleteDirName: $('deleteDirName'),
     deleteDirPath: $('deleteDirPath'),
+    // Move item modal elements
+    moveItemModal: $('moveItemModal'),
+    closeMoveItem: $('closeMoveItem'),
+    moveItemForm: $('moveItemForm'),
+    moveItemSourcePath: $('moveItemSourcePath'),
+    moveItemTargetDir: $('moveItemTargetDir'),
+    moveItemDestinationPath: $('moveItemDestinationPath'),
+    moveItemError: $('moveItemError'),
+    moveItemCancelBtn: $('moveItemCancelBtn'),
+    moveItemConfirmBtn: $('moveItemConfirmBtn'),
     // Edit mode elements
     editBtn: $('editBtn'),
     saveBtn: $('saveBtn'),
@@ -186,7 +201,50 @@ const el = {
     createDirName: $('createDirName'),
     createDirError: $('createDirError'),
     createDirCancelBtn: $('createDirCancelBtn'),
-    createDirConfirmBtn: $('createDirConfirmBtn')
+    createDirConfirmBtn: $('createDirConfirmBtn'),
+    // AI settings elements
+    aiSettingsBtn: $('aiSettingsBtn'),
+    aiSettingsModal: $('aiSettingsModal'),
+    closeAiSettings: $('closeAiSettings'),
+    aiSettingsForm: $('aiSettingsForm'),
+    aiTextProvider: $('aiTextProvider'),
+    aiTextModel: $('aiTextModel'),
+    aiTextBaseUrl: $('aiTextBaseUrl'),
+    aiTextApiKeyEnv: $('aiTextApiKeyEnv'),
+    aiImageProvider: $('aiImageProvider'),
+    aiImageModel: $('aiImageModel'),
+    aiImageBaseUrl: $('aiImageBaseUrl'),
+    aiImageApiKeyEnv: $('aiImageApiKeyEnv'),
+    aiImageSize: $('aiImageSize'),
+    aiImageQuality: $('aiImageQuality'),
+    aiCustomImageCommand: $('aiCustomImageCommand'),
+    aiDefaultPreset: $('aiDefaultPreset'),
+    aiDefaultDensity: $('aiDefaultDensity'),
+    aiDefaultOutputDir: $('aiDefaultOutputDir'),
+    aiBatchSize: $('aiBatchSize'),
+    aiTimeoutSeconds: $('aiTimeoutSeconds'),
+    aiRetryCount: $('aiRetryCount'),
+    aiSettingsStatus: $('aiSettingsStatus'),
+    testAiSettingsBtn: $('testAiSettingsBtn'),
+    cancelAiSettingsBtn: $('cancelAiSettingsBtn'),
+    saveAiSettingsBtn: $('saveAiSettingsBtn'),
+    // Illustrator elements
+    illustratorBtn: $('illustratorBtn'),
+    illustratorModal: $('illustratorModal'),
+    closeIllustrator: $('closeIllustrator'),
+    closeIllustratorFooterBtn: $('closeIllustratorFooterBtn'),
+    illustratorPreset: $('illustratorPreset'),
+    illustratorDensity: $('illustratorDensity'),
+    illustratorOutputDir: $('illustratorOutputDir'),
+    analyzeIllustratorBtn: $('analyzeIllustratorBtn'),
+    startIllustratorBtn: $('startIllustratorBtn'),
+    cancelIllustratorJobBtn: $('cancelIllustratorJobBtn'),
+    illustratorProgressFill: $('illustratorProgressFill'),
+    illustratorProgressText: $('illustratorProgressText'),
+    illustratorLog: $('illustratorLog'),
+    illustratorAnalysis: $('illustratorAnalysis'),
+    illustratorPreview: $('illustratorPreview'),
+    applyIllustratorBtn: $('applyIllustratorBtn')
 };
 
 // Initialize
@@ -271,6 +329,17 @@ function setupEventListeners() {
     el.closeDeleteDirConfirm.addEventListener('click', closeDeleteDirConfirm);
     el.deleteDirConfirmBtn.addEventListener('click', confirmDeleteDir);
 
+    // Move item modal
+    el.closeMoveItem.addEventListener('click', closeMoveItemModal);
+    el.moveItemModal.querySelector('.modal-backdrop').addEventListener('click', closeMoveItemModal);
+    el.moveItemCancelBtn.addEventListener('click', closeMoveItemModal);
+    el.moveItemConfirmBtn.addEventListener('click', confirmMoveItem);
+    el.moveItemTargetDir.addEventListener('change', updateMoveDestinationPreview);
+    el.moveItemForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        confirmMoveItem();
+    });
+
     // Create file modal
     el.closeCreateFile.addEventListener('click', closeCreateFileModal);
     el.createFileModal.querySelector('.modal-backdrop').addEventListener('click', closeCreateFileModal);
@@ -311,6 +380,24 @@ function setupEventListeners() {
     el.addDirModal.querySelector('.modal-backdrop').addEventListener('click', closeAddDir);
     el.addDirCancelBtn.addEventListener('click', closeAddDir);
     el.addDirConfirmBtn.addEventListener('click', addDirectory);
+
+    // AI settings
+    el.aiSettingsBtn.addEventListener('click', openAiSettings);
+    el.closeAiSettings.addEventListener('click', closeAiSettings);
+    el.aiSettingsModal.querySelector('.modal-backdrop').addEventListener('click', closeAiSettings);
+    el.cancelAiSettingsBtn.addEventListener('click', closeAiSettings);
+    el.saveAiSettingsBtn.addEventListener('click', saveAiSettings);
+    el.testAiSettingsBtn.addEventListener('click', testAiSettings);
+
+    // Article illustrator
+    el.illustratorBtn.addEventListener('click', openIllustrator);
+    el.closeIllustrator.addEventListener('click', closeIllustrator);
+    el.closeIllustratorFooterBtn.addEventListener('click', closeIllustrator);
+    el.illustratorModal.querySelector('.modal-backdrop').addEventListener('click', closeIllustrator);
+    el.analyzeIllustratorBtn.addEventListener('click', analyzeIllustrator);
+    el.startIllustratorBtn.addEventListener('click', startIllustratorJob);
+    el.cancelIllustratorJobBtn.addEventListener('click', cancelIllustratorJob);
+    el.applyIllustratorBtn.addEventListener('click', applyIllustratorJob);
 
     // Tree filter
     el.treeFilterBtn.addEventListener('click', toggleTreeFilter);
@@ -378,6 +465,12 @@ function handleKeyboard(e) {
         if (isSearchOpen) {
             closeSearch();
         }
+        if (el.aiSettingsModal.classList.contains('visible')) {
+            closeAiSettings();
+        }
+        if (el.illustratorModal.classList.contains('visible')) {
+            closeIllustrator();
+        }
         // Only close login modal if auth is not required or already authenticated
         if (el.loginModal.classList.contains('visible') && (!authEnabled || authToken)) {
             closeLoginModal();
@@ -389,6 +482,9 @@ function handleKeyboard(e) {
         // Close delete directory confirm modal
         if (el.deleteDirConfirmModal.classList.contains('visible')) {
             closeDeleteDirConfirm();
+        }
+        if (el.moveItemModal.classList.contains('visible')) {
+            closeMoveItemModal();
         }
     }
 }
@@ -592,39 +688,157 @@ async function authFetch(url, options = {}) {
 // Directory Tree
 // ========================================
 
+let directoryTreeData = [];
+
+function buildDirectoryRequestUrl(path = null) {
+    const params = new URLSearchParams();
+    if (showTxtFiles) params.append('txt', 'true');
+    if (showJsonFiles) params.append('json', 'true');
+    if (!showImageFiles) params.append('images', 'false');
+    if (path) params.append('path', path);
+    return `/api/directories${params.toString() ? '?' + params.toString() : ''}`;
+}
+
+function shouldShowDirectoryNode(node) {
+    if (showEmptyDirectories) {
+        return true;
+    }
+    if (node.type !== 'directory') {
+        return true;
+    }
+    return node.has_children || (Array.isArray(node.children) && node.children.length > 0);
+}
+
+function getVisibleTreeNodes(nodes) {
+    return nodes.filter(node => shouldShowDirectoryNode(node));
+}
+
+function collectDirectoryOptions(nodes, result = []) {
+    nodes.forEach(node => {
+        if (node?.type !== 'directory') return;
+        result.push({ path: node.path, name: node.name });
+        if (Array.isArray(node.children) && node.children.length > 0) {
+            collectDirectoryOptions(node.children, result);
+        }
+    });
+    return result;
+}
+
+function findNodeByPath(path, nodes = directoryTreeData) {
+    for (const node of nodes) {
+        if (node?.path === path) {
+            return node;
+        }
+        if (node?.type === 'directory' && Array.isArray(node.children) && node.children.length > 0) {
+            const match = findNodeByPath(path, node.children);
+            if (match) {
+                return match;
+            }
+        }
+    }
+    return null;
+}
+
+function updateDirectoryOptionsCache() {
+    directoryOptionsCache = collectDirectoryOptions(directoryTreeData);
+}
+
+function ensureDefaultExpandedRoots() {
+    const expandedPaths = getExpandedPaths();
+    if (expandedPaths.size > 0) {
+        return;
+    }
+    directoryTreeData.forEach(node => {
+        if (node?.type === 'directory') {
+            expandedPaths.add(node.path);
+        }
+    });
+    localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+}
+
+async function fetchDirectoryChildren(path) {
+    const response = await authFetch(buildDirectoryRequestUrl(path));
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.error || 'Failed to load directory');
+    }
+    return Array.isArray(data) ? data : [];
+}
+
+async function ensureDirectoryLoaded(path) {
+    const node = findNodeByPath(path);
+    if (!node || node.type !== 'directory') {
+        return null;
+    }
+    if (node.children_loaded) {
+        return node;
+    }
+
+    const children = await fetchDirectoryChildren(path);
+    node.children = children;
+    node.children_loaded = true;
+    node.has_children = children.length > 0;
+    node.is_empty = children.length === 0;
+    updateDirectoryOptionsCache();
+    return node;
+}
+
+async function restoreExpandedDirectories() {
+    const expandedPaths = Array.from(getExpandedPaths())
+        .sort((a, b) => a.split('/').length - b.split('/').length);
+
+    for (const path of expandedPaths) {
+        const node = findNodeByPath(path);
+        if (!node || node.type !== 'directory' || node.children_loaded || !node.has_children) {
+            continue;
+        }
+        try {
+            await ensureDirectoryLoaded(path);
+        } catch (error) {
+            console.error(`Failed to restore directory ${path}:`, error);
+        }
+    }
+}
+
+function renderDirectoryTree() {
+    const visibleDirectories = getVisibleTreeNodes(directoryTreeData);
+    el.treeItems.innerHTML = '';
+
+    if (visibleDirectories.length === 0) {
+        el.treeItems.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 13px;">
+                No pages found
+            </div>
+        `;
+        updateDirectoryOptionsCache();
+        updateExpandAllButton();
+        return;
+    }
+
+    visibleDirectories.forEach(dir => {
+        el.treeItems.appendChild(renderTree(dir, 0));
+    });
+
+    updateDirectoryOptionsCache();
+    updateExpandAllButton();
+
+    if (currentPath) {
+        highlightTreeItem(currentPath);
+    }
+}
+
 async function loadDirectories() {
     try {
-        // Build URL with file type parameters
-        const params = new URLSearchParams();
-        if (showTxtFiles) params.append('txt', 'true');
-        if (showJsonFiles) params.append('json', 'true');
-        if (!showImageFiles) params.append('images', 'false');
-
-        const url = `/api/directories${params.toString() ? '?' + params.toString() : ''}`;
-        const response = await authFetch(url);
-        let directories = await response.json();
-
-        // Filter empty directories if showEmptyDirectories is false
-        if (!showEmptyDirectories) {
-            directories = directories.map(filterEmptyDirectories);
-            directories = directories.filter(dir => dir !== null);
+        const response = await authFetch(buildDirectoryRequestUrl());
+        const directories = await response.json();
+        if (!response.ok) {
+            throw new Error(directories.error || 'Failed to load directories');
         }
 
-        el.treeItems.innerHTML = '';
-
-        if (directories.length === 0) {
-            el.treeItems.innerHTML = `
-                <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 13px;">
-                    No pages found
-                </div>
-            `;
-            return;
-        }
-
-        directories.forEach(dir => {
-            const treeElement = renderTree(dir, 0);
-            el.treeItems.appendChild(treeElement);
-        });
+        directoryTreeData = Array.isArray(directories) ? directories : [];
+        ensureDefaultExpandedRoots();
+        await restoreExpandedDirectories();
+        renderDirectoryTree();
     } catch (error) {
         console.error('Failed to load directories:', error);
         el.treeItems.innerHTML = `
@@ -632,38 +846,45 @@ async function loadDirectories() {
                 Failed to load pages
             </div>
         `;
+        directoryTreeData = [];
+        directoryOptionsCache = [];
+        updateExpandAllButton();
     }
 }
 
-// Filter empty directories recursively
-function filterEmptyDirectories(node) {
-    // 防止 null 值
-    if (!node) {
-        return null;
+async function toggleDirectoryNode(node) {
+    if (node.type !== 'directory') {
+        return;
     }
 
-    if (node.type === 'file') {
-        return node;
+    const expandable = node.has_children || (node.children_loaded && node.children.length > 0);
+    if (!expandable) {
+        return;
     }
 
-    if (!node.children || node.children.length === 0) {
-        return null;  // Empty directory, remove it
+    const expandedPaths = getExpandedPaths();
+    const isExpanded = expandedPaths.has(node.path);
+
+    if (isExpanded) {
+        expandedPaths.delete(node.path);
+        localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+        renderDirectoryTree();
+        return;
     }
 
-    // Filter children recursively
-    const filteredChildren = node.children
-        .map(child => filterEmptyDirectories(child))
-        .filter(child => child !== null);
-
-    // If all children were filtered out, remove this directory too
-    if (filteredChildren.length === 0) {
-        return null;
+    if (!node.children_loaded) {
+        try {
+            await ensureDirectoryLoaded(node.path);
+        } catch (error) {
+            console.error(`Failed to expand directory ${node.path}:`, error);
+            showToast(error.message || 'Failed to load directory');
+            return;
+        }
     }
 
-    return {
-        ...node,
-        children: filteredChildren
-    };
+    expandedPaths.add(node.path);
+    localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+    renderDirectoryTree();
 }
 
 function renderTree(node, level) {
@@ -671,17 +892,17 @@ function renderTree(node, level) {
     item.className = 'tree-item';
     const isTouchMode = isTouchInteractionMode();
 
-    const hasChildren = node.type === 'directory' && node.children && node.children.length > 0;
-    if (!hasChildren) {
+    const isDirectory = node.type === 'directory';
+    const hasRenderedChildren = isDirectory && Array.isArray(node.children) && getVisibleTreeNodes(node.children).length > 0;
+    const canExpand = isDirectory && (node.has_children || hasRenderedChildren);
+    if (!canExpand) {
         item.classList.add('no-children');
     }
 
-    // Row
     const row = document.createElement('div');
     row.className = 'tree-row';
-    row.dataset.path = node.path;  // Store path for expand state saving
+    row.dataset.path = node.path;
 
-    // Toggle arrow
     const toggle = document.createElement('div');
     toggle.className = 'tree-toggle';
     toggle.innerHTML = `
@@ -691,21 +912,18 @@ function renderTree(node, level) {
     `;
     row.appendChild(toggle);
 
-    // Icon
     const icon = document.createElement('div');
     icon.className = 'tree-icon';
 
-    if (node.type === 'directory') {
+    if (isDirectory) {
         icon.innerHTML = `
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
             </svg>
         `;
     } else {
-        // Get file extension
         const ext = node.name.split('.').pop().toLowerCase();
         if (ext === 'md') {
-            // Markdown file icon
             icon.innerHTML = `
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
@@ -715,7 +933,6 @@ function renderTree(node, level) {
                 </svg>
             `;
         } else if (ext === 'txt') {
-            // TXT file icon
             icon.innerHTML = `
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -725,7 +942,6 @@ function renderTree(node, level) {
                 </svg>
             `;
         } else if (ext === 'json') {
-            // JSON file icon
             icon.innerHTML = `
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -737,7 +953,6 @@ function renderTree(node, level) {
                 </svg>
             `;
         } else if (isImageExtension(ext)) {
-            // Image file icon
             icon.innerHTML = `
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -749,18 +964,15 @@ function renderTree(node, level) {
     }
     row.appendChild(icon);
 
-    // Label
     const label = document.createElement('span');
     label.className = 'tree-label';
-    label.textContent = node.name;  // Show full name with extension
+    label.textContent = node.name;
     row.appendChild(label);
 
-    // Action buttons container
     const actionButtons = document.createElement('div');
     actionButtons.className = 'tree-action-buttons';
     actionButtons.style.cssText = 'display: none; align-items: center; gap: 2px; margin-left: auto;';
 
-    // Copy path button for both files and directories
     const copyBtn = document.createElement('button');
     copyBtn.className = 'tree-copy-btn';
     copyBtn.title = 'Copy path';
@@ -777,8 +989,23 @@ function renderTree(node, level) {
     });
     actionButtons.appendChild(copyBtn);
 
-    // Add button for directories only (shows dropdown menu)
-    if (node.type === 'directory') {
+    const moveBtn = document.createElement('button');
+    moveBtn.className = 'tree-move-btn';
+    moveBtn.title = node.type === 'directory' ? 'Move directory' : 'Move file';
+    moveBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12h14"/>
+            <path d="M13 5l7 7-7 7"/>
+        </svg>
+    `;
+    moveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        openMoveItemModal(node.path, node.name, node.type);
+    });
+    actionButtons.appendChild(moveBtn);
+
+    if (isDirectory) {
         const addBtn = document.createElement('button');
         addBtn.className = 'tree-add-btn';
         addBtn.title = 'Add file or directory';
@@ -789,7 +1016,6 @@ function renderTree(node, level) {
             </svg>
         `;
 
-        // Create dropdown menu
         const dropdown = document.createElement('div');
         dropdown.className = 'tree-dropdown';
         dropdown.style.cssText = `
@@ -806,7 +1032,6 @@ function renderTree(node, level) {
             padding: 4px 0;
         `;
 
-        // New file option
         const newFileOption = document.createElement('div');
         newFileOption.className = 'tree-dropdown-item';
         newFileOption.style.cssText = `
@@ -838,7 +1063,6 @@ function renderTree(node, level) {
             openCreateFileModal(node.path);
         });
 
-        // New directory option
         const newDirOption = document.createElement('div');
         newDirOption.className = 'tree-dropdown-item';
         newDirOption.style.cssText = `
@@ -874,7 +1098,6 @@ function renderTree(node, level) {
         dropdown.appendChild(newFileOption);
         dropdown.appendChild(newDirOption);
 
-        // Wrap button and dropdown in a container
         const addBtnContainer = document.createElement('div');
         addBtnContainer.style.cssText = 'position: relative;';
         addBtnContainer.appendChild(addBtn);
@@ -883,7 +1106,6 @@ function renderTree(node, level) {
         addBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             e.preventDefault();
-            // Toggle dropdown
             const isVisible = dropdown.style.display === 'block';
             hideAllDropdowns();
             if (!isVisible) {
@@ -894,8 +1116,7 @@ function renderTree(node, level) {
         actionButtons.insertBefore(addBtnContainer, actionButtons.firstChild);
     }
 
-    // Delete button for directories only
-    if (node.type === 'directory') {
+    if (isDirectory) {
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'tree-delete-btn';
         deleteBtn.title = 'Delete directory';
@@ -915,7 +1136,6 @@ function renderTree(node, level) {
 
     row.appendChild(actionButtons);
 
-    // Show/hide on hover
     if (!isTouchMode) {
         row.addEventListener('mouseenter', () => {
             actionButtons.style.display = 'flex';
@@ -927,51 +1147,39 @@ function renderTree(node, level) {
 
     item.appendChild(row);
 
-    // Children
-    if (hasChildren) {
+    if (isDirectory) {
         const children = document.createElement('div');
         children.className = 'tree-children';
 
-        node.children.forEach(child => {
+        getVisibleTreeNodes(node.children || []).forEach(child => {
             children.appendChild(renderTree(child, level + 1));
         });
 
         item.appendChild(children);
 
-        // Auto-expand root level or restore expanded state
-        const expandedPaths = getExpandedPaths();
-        if (level === 0 || expandedPaths.has(node.path)) {
+        if (getExpandedPaths().has(node.path)) {
             item.classList.add('expanded');
         }
 
-        // Toggle handler
-        const toggleDirectory = () => {
-            item.classList.toggle('expanded');
-            saveExpandedState();
-        };
-
-        toggle.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            toggleDirectory();
-        });
-
-        row.addEventListener('click', (e) => {
+        const handleToggle = async (e) => {
             if (e.target.closest('.tree-action-buttons, .tree-dropdown')) {
                 return;
             }
+            e.stopPropagation();
+            e.preventDefault();
             setActiveRow(row);
-            toggleDirectory();
-        });
+            await toggleDirectoryNode(node);
+        };
+
+        toggle.addEventListener('click', handleToggle);
+        row.addEventListener('click', handleToggle);
     }
 
-    // File click handler
     if (node.type === 'file') {
         row.addEventListener('click', () => {
             loadFile(node.path, node.name);
             setActiveRow(row);
 
-            // Close sidebar on mobile
             if (window.innerWidth <= 768) {
                 el.sidebar.classList.remove('open');
             }
@@ -1049,6 +1257,7 @@ async function loadFile(filePath, fileName) {
         // Enable delete button
         el.deleteBtn.disabled = false;
         el.shareBtn.disabled = false;
+        el.illustratorBtn.disabled = isImageFile || !filePath.toLowerCase().endsWith('.md') || currentRawContent === null;
 
         el.docTitle.textContent = data.title;
         el.docPath.textContent = simplifyPath(data.path);
@@ -2054,6 +2263,383 @@ function formatShareTime(value) {
 }
 
 // ========================================
+// AI Settings
+// ========================================
+
+async function openAiSettings() {
+    el.aiSettingsModal.classList.add('visible');
+    setAiSettingsStatus('Loading settings...');
+    await loadAiSettings();
+}
+
+function closeAiSettings() {
+    el.aiSettingsModal.classList.remove('visible');
+}
+
+async function loadAiSettings() {
+    try {
+        const response = await authFetch('/api/ai-settings');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load AI settings');
+        }
+        aiSettingsCache = data;
+        populateAiSettingsForm(data);
+        const keyStatus = [
+            data.text_api_key_available ? 'Text key available' : 'Text key missing',
+            data.image_api_key_available ? 'Image key available' : 'Image key missing'
+        ].join(' · ');
+        setAiSettingsStatus(keyStatus, data.text_api_key_available && data.image_api_key_available ? 'ok' : 'warn');
+    } catch (error) {
+        console.error('Failed to load AI settings:', error);
+        setAiSettingsStatus(error.message, 'error');
+    }
+}
+
+function populateAiSettingsForm(settings) {
+    el.aiTextProvider.value = settings.text_provider || 'openai-compatible';
+    el.aiTextModel.value = settings.text_model || '';
+    el.aiTextBaseUrl.value = settings.text_base_url || '';
+    el.aiTextApiKeyEnv.value = settings.text_api_key_env || '';
+    el.aiImageProvider.value = settings.image_provider || 'openai-compatible';
+    el.aiImageModel.value = settings.image_model || '';
+    el.aiImageBaseUrl.value = settings.image_base_url || '';
+    el.aiImageApiKeyEnv.value = settings.image_api_key_env || '';
+    el.aiImageSize.value = settings.image_size || '1536x1024';
+    el.aiImageQuality.value = settings.image_quality || 'auto';
+    el.aiCustomImageCommand.value = settings.custom_image_command || '';
+    el.aiDefaultPreset.value = settings.default_preset || 'hand-drawn-edu';
+    el.aiDefaultDensity.value = settings.default_density || 'balanced';
+    el.aiDefaultOutputDir.value = settings.default_output_dir || 'imgs-subdir';
+    el.aiBatchSize.value = settings.batch_size || 2;
+    el.aiTimeoutSeconds.value = settings.timeout_seconds || 120;
+    el.aiRetryCount.value = settings.retry_count || 1;
+}
+
+function collectAiSettingsForm() {
+    return {
+        text_provider: el.aiTextProvider.value,
+        text_model: el.aiTextModel.value.trim(),
+        text_base_url: el.aiTextBaseUrl.value.trim(),
+        text_api_key_env: el.aiTextApiKeyEnv.value.trim(),
+        image_provider: el.aiImageProvider.value,
+        image_model: el.aiImageModel.value.trim(),
+        image_base_url: el.aiImageBaseUrl.value.trim(),
+        image_api_key_env: el.aiImageApiKeyEnv.value.trim(),
+        image_size: el.aiImageSize.value,
+        image_quality: el.aiImageQuality.value,
+        custom_image_command: el.aiCustomImageCommand.value.trim(),
+        default_preset: el.aiDefaultPreset.value,
+        default_density: el.aiDefaultDensity.value,
+        default_output_dir: el.aiDefaultOutputDir.value,
+        batch_size: Number(el.aiBatchSize.value || 2),
+        timeout_seconds: Number(el.aiTimeoutSeconds.value || 120),
+        retry_count: Number(el.aiRetryCount.value || 1)
+    };
+}
+
+async function saveAiSettings() {
+    setAiSettingsStatus('Saving settings...');
+    el.saveAiSettingsBtn.disabled = true;
+    try {
+        const response = await authFetch('/api/ai-settings', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(collectAiSettingsForm())
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to save AI settings');
+        }
+        aiSettingsCache = data;
+        populateAiSettingsForm(data);
+        setAiSettingsStatus('Settings saved', 'ok');
+        showToast('AI settings saved');
+    } catch (error) {
+        console.error('Failed to save AI settings:', error);
+        setAiSettingsStatus(error.message, 'error');
+    } finally {
+        el.saveAiSettingsBtn.disabled = false;
+    }
+}
+
+async function testAiSettings() {
+    setAiSettingsStatus('Testing providers...');
+    el.testAiSettingsBtn.disabled = true;
+    try {
+        const response = await authFetch('/api/ai-settings/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(collectAiSettingsForm())
+        });
+        const data = await response.json();
+        const textMessage = data.text ? data.text.message : '';
+        const imageMessage = data.image ? data.image.message : '';
+        setAiSettingsStatus(`${textMessage} · ${imageMessage}`, response.ok ? 'ok' : 'error');
+    } catch (error) {
+        console.error('Failed to test AI settings:', error);
+        setAiSettingsStatus(error.message, 'error');
+    } finally {
+        el.testAiSettingsBtn.disabled = false;
+    }
+}
+
+function setAiSettingsStatus(message, type = '') {
+    el.aiSettingsStatus.textContent = message || '';
+    el.aiSettingsStatus.className = `settings-status ${type}`.trim();
+}
+
+// ========================================
+// Article Illustrator
+// ========================================
+
+async function openIllustrator() {
+    if (!currentPath || !currentPath.toLowerCase().endsWith('.md')) {
+        showToast('Open a Markdown file first');
+        return;
+    }
+    el.illustratorModal.classList.add('visible');
+    illustratorAnalysisCache = null;
+    illustratorJobId = null;
+    resetIllustratorUi();
+    if (!aiSettingsCache) {
+        await fetchAiSettingsForIllustrator();
+    }
+    if (aiSettingsCache) {
+        el.illustratorPreset.value = aiSettingsCache.default_preset || 'hand-drawn-edu';
+        el.illustratorDensity.value = aiSettingsCache.default_density || 'balanced';
+        el.illustratorOutputDir.value = aiSettingsCache.default_output_dir || 'imgs-subdir';
+    }
+}
+
+function closeIllustrator() {
+    el.illustratorModal.classList.remove('visible');
+}
+
+async function fetchAiSettingsForIllustrator() {
+    try {
+        const response = await authFetch('/api/ai-settings');
+        const data = await response.json();
+        if (response.ok) {
+            aiSettingsCache = data;
+        }
+    } catch (error) {
+        console.error('Failed to fetch AI settings:', error);
+    }
+}
+
+function illustratorSettingsPayload() {
+    return {
+        preset: el.illustratorPreset.value,
+        density: el.illustratorDensity.value,
+        default_output_dir: el.illustratorOutputDir.value,
+        default_preset: el.illustratorPreset.value,
+        default_density: el.illustratorDensity.value
+    };
+}
+
+function resetIllustratorUi() {
+    el.startIllustratorBtn.disabled = true;
+    el.applyIllustratorBtn.disabled = true;
+    el.cancelIllustratorJobBtn.style.display = 'none';
+    el.illustratorAnalysis.className = 'illustrator-analysis empty-state';
+    el.illustratorAnalysis.textContent = 'Run analysis to preview illustration positions.';
+    el.illustratorPreview.className = 'illustrator-preview empty-state';
+    el.illustratorPreview.textContent = 'Generated images and Markdown diff will appear here.';
+    el.illustratorLog.innerHTML = '';
+    updateIllustratorProgress(0, 'Ready');
+}
+
+async function analyzeIllustrator() {
+    el.analyzeIllustratorBtn.disabled = true;
+    el.startIllustratorBtn.disabled = true;
+    renderIllustratorLog([{message: 'Analyzing article...'}]);
+    updateIllustratorProgress(5, 'Analyzing article');
+    try {
+        const response = await authFetch('/api/illustrator/analyze', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                path: currentPath,
+                settings: illustratorSettingsPayload()
+            })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Analysis failed');
+        }
+        illustratorAnalysisCache = data.analysis;
+        renderIllustratorAnalysis(data.analysis);
+        el.startIllustratorBtn.disabled = false;
+        updateIllustratorProgress(100, 'Analysis ready');
+    } catch (error) {
+        console.error('Illustrator analysis failed:', error);
+        el.illustratorAnalysis.className = 'illustrator-analysis empty-state';
+        el.illustratorAnalysis.textContent = error.message;
+        updateIllustratorProgress(0, 'Analysis failed');
+    } finally {
+        el.analyzeIllustratorBtn.disabled = false;
+    }
+}
+
+function renderIllustratorAnalysis(analysis) {
+    const items = analysis.illustrations || [];
+    el.illustratorAnalysis.className = 'illustrator-analysis';
+    el.illustratorAnalysis.innerHTML = `
+        <div class="analysis-meta">
+            <div><strong>Type</strong><span>${escapeHtml(analysis.content_type || '-')}</span></div>
+            <div><strong>Preset</strong><span>${escapeHtml(analysis.recommended_preset || el.illustratorPreset.value)}</span></div>
+            <div><strong>Density</strong><span>${escapeHtml(analysis.recommended_density || el.illustratorDensity.value)}</span></div>
+            <div><strong>Images</strong><span>${items.length}</span></div>
+        </div>
+        ${analysis.provider_warning ? `<div class="analysis-warning">${escapeHtml(analysis.provider_warning)}</div>` : ''}
+        <div class="analysis-list">
+            ${items.map((item, index) => `
+                <div class="analysis-item">
+                    <div class="analysis-item-title">${index + 1}. ${escapeHtml(item.title || item.position_heading || 'Illustration')}</div>
+                    <div class="analysis-item-meta">${escapeHtml(item.type || 'infographic')} · ${escapeHtml(item.position_heading || 'article body')}</div>
+                    <div class="analysis-item-purpose">${escapeHtml(item.purpose || '')}</div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+async function startIllustratorJob() {
+    if (!illustratorAnalysisCache) {
+        await analyzeIllustrator();
+        if (!illustratorAnalysisCache) return;
+    }
+    el.startIllustratorBtn.disabled = true;
+    el.analyzeIllustratorBtn.disabled = true;
+    el.applyIllustratorBtn.disabled = true;
+    updateIllustratorProgress(0, 'Creating job');
+    try {
+        const response = await authFetch('/api/illustrator/jobs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                path: currentPath,
+                settings: illustratorSettingsPayload(),
+                analysis: illustratorAnalysisCache
+            })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to create job');
+        }
+        illustratorJobId = data.job_id;
+        el.cancelIllustratorJobBtn.style.display = 'inline-flex';
+        pollIllustratorJob();
+    } catch (error) {
+        console.error('Failed to start illustrator job:', error);
+        updateIllustratorProgress(0, error.message);
+        el.startIllustratorBtn.disabled = false;
+        el.analyzeIllustratorBtn.disabled = false;
+    }
+}
+
+async function pollIllustratorJob() {
+    if (!illustratorJobId) return;
+    clearTimeout(illustratorPollTimer);
+    try {
+        const response = await authFetch(`/api/illustrator/jobs/${encodeURIComponent(illustratorJobId)}`);
+        const job = await response.json();
+        if (!response.ok) {
+            throw new Error(job.error || 'Failed to load job');
+        }
+        updateIllustratorProgress(job.progress || 0, job.message || job.status);
+        renderIllustratorLog(job.logs || []);
+        if (job.status === 'completed') {
+            el.cancelIllustratorJobBtn.style.display = 'none';
+            el.analyzeIllustratorBtn.disabled = false;
+            await loadIllustratorPreview();
+            return;
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+            el.cancelIllustratorJobBtn.style.display = 'none';
+            el.analyzeIllustratorBtn.disabled = false;
+            el.startIllustratorBtn.disabled = false;
+            return;
+        }
+        illustratorPollTimer = setTimeout(pollIllustratorJob, 1500);
+    } catch (error) {
+        console.error('Failed to poll illustrator job:', error);
+        updateIllustratorProgress(0, error.message);
+        el.analyzeIllustratorBtn.disabled = false;
+        el.startIllustratorBtn.disabled = false;
+    }
+}
+
+async function loadIllustratorPreview() {
+    const response = await authFetch(`/api/illustrator/jobs/${encodeURIComponent(illustratorJobId)}/preview`);
+    const result = await response.json();
+    if (!response.ok) {
+        throw new Error(result.error || 'Failed to load preview');
+    }
+    renderIllustratorPreview(result);
+    el.applyIllustratorBtn.disabled = false;
+}
+
+function renderIllustratorPreview(result) {
+    const illustrations = result.illustrations || [];
+    el.illustratorPreview.className = 'illustrator-preview';
+    el.illustratorPreview.innerHTML = `
+        <div class="generated-grid">
+            ${illustrations.map(item => `
+                <div class="generated-item">
+                    <img src="/api/image?path=${encodeURIComponent(item.image_path)}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}" alt="${escapeHtml(item.title || item.filename)}">
+                    <div class="generated-caption">${escapeHtml(item.filename)}</div>
+                </div>
+            `).join('')}
+        </div>
+        <div class="diff-block">${escapeHtml(result.diff || '')}</div>
+    `;
+}
+
+function renderIllustratorLog(logs) {
+    el.illustratorLog.innerHTML = (logs || []).slice(-80).map(log => {
+        const message = typeof log === 'string' ? log : log.message;
+        return `<div>${escapeHtml(message || '')}</div>`;
+    }).join('');
+    el.illustratorLog.scrollTop = el.illustratorLog.scrollHeight;
+}
+
+function updateIllustratorProgress(progress, text) {
+    const normalized = Math.max(0, Math.min(100, Number(progress) || 0));
+    el.illustratorProgressFill.style.width = `${normalized}%`;
+    el.illustratorProgressText.textContent = text || `${normalized}%`;
+}
+
+async function cancelIllustratorJob() {
+    if (!illustratorJobId) return;
+    await authFetch(`/api/illustrator/jobs/${encodeURIComponent(illustratorJobId)}/cancel`, {method: 'POST'});
+    updateIllustratorProgress(0, 'Cancel requested');
+}
+
+async function applyIllustratorJob() {
+    if (!illustratorJobId) return;
+    el.applyIllustratorBtn.disabled = true;
+    try {
+        const response = await authFetch(`/api/illustrator/jobs/${encodeURIComponent(illustratorJobId)}/apply`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to apply illustrations');
+        }
+        showToast('Illustrations applied');
+        closeIllustrator();
+        await loadFile(currentPath);
+        await loadDirectories();
+    } catch (error) {
+        console.error('Failed to apply illustrator job:', error);
+        showToast(error.message);
+        el.applyIllustratorBtn.disabled = false;
+    }
+}
+
+// ========================================
 // Toast
 // ========================================
 
@@ -2162,8 +2748,7 @@ async function saveDirectories() {
         if (response.ok) {
             showToast('Directories saved successfully');
             closeDirConfig();
-            // Reload directories tree
-            loadDirectories();
+            await loadDirectories();
         } else {
             el.dirError.textContent = data.error || 'Failed to save directories';
             el.dirError.style.display = 'block';
@@ -2245,11 +2830,11 @@ function initTreeFilter() {
     updateTreeFilterButton();
 }
 
-function toggleTreeFilter() {
+async function toggleTreeFilter() {
     showEmptyDirectories = !showEmptyDirectories;
     localStorage.setItem('showEmptyDirectories', showEmptyDirectories);
     updateTreeFilterButton();
-    loadDirectories();
+    await loadDirectories();
 }
 
 function updateTreeFilterButton() {
@@ -2280,25 +2865,25 @@ function initFileFilters() {
     updateFileFilterButtons();
 }
 
-function toggleTxtFilter() {
+async function toggleTxtFilter() {
     showTxtFiles = !showTxtFiles;
     localStorage.setItem('showTxtFiles', showTxtFiles);
     updateFileFilterButtons();
-    loadDirectories();
+    await loadDirectories();
 }
 
-function toggleJsonFilter() {
+async function toggleJsonFilter() {
     showJsonFiles = !showJsonFiles;
     localStorage.setItem('showJsonFiles', showJsonFiles);
     updateFileFilterButtons();
-    loadDirectories();
+    await loadDirectories();
 }
 
-function toggleImageFilter() {
+async function toggleImageFilter() {
     showImageFiles = !showImageFiles;
     localStorage.setItem('showImageFiles', showImageFiles);
     updateFileFilterButtons();
-    loadDirectories();
+    await loadDirectories();
 }
 
 function updateFileFilterButtons() {
@@ -2401,70 +2986,62 @@ function saveExpandedState() {
     const paths = [];
     expandedItems.forEach(item => {
         const row = item.querySelector('.tree-row');
-        if (row) {
-            const path = row.dataset?.path;
-            if (path) {
-                paths.push(path);
-            }
+        if (row?.dataset?.path) {
+            paths.push(row.dataset.path);
         }
     });
     localStorage.setItem('expandedPaths', JSON.stringify(paths));
 }
 
-function toggleExpandAll() {
-    allExpanded = !allExpanded;
-    const treeItems = el.treeItems.querySelectorAll('.tree-item');
-    
-    treeItems.forEach(item => {
-        if (allExpanded) {
-            item.classList.add('expanded');
-        } else {
-            // Don't collapse root level items
-            const isRoot = item.parentElement === el.treeItems;
-            if (!isRoot) {
-                item.classList.remove('expanded');
-            }
+function getLoadedExpandableDirectoryPaths(nodes = directoryTreeData, result = []) {
+    nodes.forEach(node => {
+        if (node?.type !== 'directory') {
+            return;
+        }
+        if (node.has_children || (node.children_loaded && node.children.length > 0)) {
+            result.push(node.path);
+        }
+        if (Array.isArray(node.children) && node.children.length > 0) {
+            getLoadedExpandableDirectoryPaths(node.children, result);
         }
     });
-    
-    // Save state
+    return result;
+}
+
+function getRootDirectoryPaths() {
+    return directoryTreeData
+        .filter(node => node?.type === 'directory')
+        .map(node => node.path);
+}
+
+function toggleExpandAll() {
+    const loadedPaths = getLoadedExpandableDirectoryPaths();
+    allExpanded = !allExpanded;
+
     if (allExpanded) {
-        // Save all paths
-        const allPaths = [];
-        treeItems.forEach(item => {
-            const row = item.querySelector('.tree-row');
-            if (row && row.dataset?.path) {
-                allPaths.push(row.dataset.path);
-            }
-        });
-        localStorage.setItem('expandedPaths', JSON.stringify(allPaths));
+        localStorage.setItem('expandedPaths', JSON.stringify(loadedPaths));
     } else {
-        // Save only root paths
-        const rootPaths = [];
-        el.treeItems.querySelectorAll(':scope > .tree-item').forEach(item => {
-            const row = item.querySelector('.tree-row');
-            if (row && row.dataset?.path) {
-                rootPaths.push(row.dataset.path);
-            }
-        });
-        localStorage.setItem('expandedPaths', JSON.stringify(rootPaths));
+        localStorage.setItem('expandedPaths', JSON.stringify(getRootDirectoryPaths()));
     }
-    
-    updateExpandAllButton();
+
+    renderDirectoryTree();
 }
 
 function updateExpandAllButton() {
     const expandIcon = el.expandAllBtn.querySelector('.icon-expand');
     const collapseIcon = el.expandAllBtn.querySelector('.icon-collapse');
-    
+    const loadedPaths = getLoadedExpandableDirectoryPaths();
+    const expandedPaths = getExpandedPaths();
+    allExpanded = loadedPaths.length > 0 && loadedPaths.every(path => expandedPaths.has(path));
+
     if (allExpanded) {
         expandIcon.style.display = 'none';
         collapseIcon.style.display = 'block';
-        el.expandAllBtn.title = 'Collapse all directories';
+        el.expandAllBtn.title = 'Collapse loaded directories';
     } else {
         expandIcon.style.display = 'block';
         collapseIcon.style.display = 'none';
-        el.expandAllBtn.title = 'Expand all directories';
+        el.expandAllBtn.title = 'Expand loaded directories';
     }
 }
 
@@ -2499,44 +3076,24 @@ function resolveRelativePath(baseDir, relativePath) {
 // ========================================
 
 function highlightTreeItem(filePath) {
-    // Remove previous active state
     document.querySelectorAll('.tree-row.active').forEach(r => {
         r.classList.remove('active');
     });
 
-    // Find the tree item with matching path
     const treeItems = el.treeItems.querySelectorAll('.tree-item');
-    let targetItem = null;
     let targetRow = null;
 
     treeItems.forEach(item => {
         const row = item.querySelector('.tree-row');
         if (row && row.dataset.path === filePath) {
-            targetItem = item;
             targetRow = row;
         }
     });
 
-    if (!targetItem) return;
+    if (!targetRow) return;
 
-    // Expand all parent directories
-    let parent = targetItem.parentElement;
-    while (parent) {
-        if (parent.classList && parent.classList.contains('tree-children')) {
-            const parentItem = parent.parentElement;
-            if (parentItem && parentItem.classList.contains('tree-item')) {
-                parentItem.classList.add('expanded');
-            }
-        }
-        parent = parent.parentElement;
-    }
-
-    // Set active state
-    if (targetRow) {
-        targetRow.classList.add('active');
-        // Scroll into view
-        targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
+    targetRow.classList.add('active');
+    targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // ========================================
@@ -2700,6 +3257,157 @@ async function confirmDeleteDir() {
 }
 
 // ========================================
+// Move Item
+// ========================================
+
+let moveItemSourcePath = null;
+let moveItemName = null;
+let moveItemType = null;
+
+function openMoveItemModal(path, name, type) {
+    moveItemSourcePath = path;
+    moveItemName = name;
+    moveItemType = type;
+
+    el.moveItemSourcePath.textContent = simplifyPath(path);
+    el.moveItemError.style.display = 'none';
+    el.moveItemError.textContent = '';
+
+    renderMoveTargetOptions();
+    updateMoveDestinationPreview();
+
+    el.moveItemModal.classList.add('visible');
+    el.moveItemTargetDir.focus();
+}
+
+function closeMoveItemModal() {
+    el.moveItemModal.classList.remove('visible');
+    moveItemSourcePath = null;
+    moveItemName = null;
+    moveItemType = null;
+    el.moveItemTargetDir.innerHTML = '';
+    el.moveItemDestinationPath.textContent = '';
+    el.moveItemError.style.display = 'none';
+    el.moveItemError.textContent = '';
+}
+
+function renderMoveTargetOptions() {
+    const currentParent = moveItemSourcePath?.includes('/')
+        ? moveItemSourcePath.slice(0, moveItemSourcePath.lastIndexOf('/'))
+        : '';
+    const sourcePrefix = moveItemType === 'directory' ? `${moveItemSourcePath}/` : null;
+
+    const options = directoryOptionsCache.filter(option => {
+        if (option.path === currentParent) {
+            return false;
+        }
+        if (option.path === moveItemSourcePath) {
+            return false;
+        }
+        if (moveItemType === 'directory' && (option.path === moveItemSourcePath || option.path.startsWith(sourcePrefix))) {
+            return false;
+        }
+        return true;
+    });
+
+    el.moveItemTargetDir.innerHTML = '';
+
+    options.forEach(option => {
+        const element = document.createElement('option');
+        element.value = option.path;
+        element.textContent = `${option.name} · ${simplifyPath(option.path)}`;
+        if (option.path === currentParent) {
+            element.selected = true;
+        }
+        el.moveItemTargetDir.appendChild(element);
+    });
+
+    if (!options.length) {
+        const element = document.createElement('option');
+        element.value = '';
+        element.textContent = '没有可用目标目录';
+        el.moveItemTargetDir.appendChild(element);
+        el.moveItemConfirmBtn.disabled = true;
+        return;
+    }
+
+    el.moveItemConfirmBtn.disabled = false;
+}
+
+function updateMoveDestinationPreview() {
+    const targetDirectory = el.moveItemTargetDir.value;
+    if (!targetDirectory || !moveItemName) {
+        el.moveItemDestinationPath.textContent = '';
+        return;
+    }
+    el.moveItemDestinationPath.textContent = simplifyPath(`${targetDirectory}/${moveItemName}`);
+}
+
+async function confirmMoveItem() {
+    if (!moveItemSourcePath) return;
+
+    const targetDirectory = el.moveItemTargetDir.value;
+    if (!targetDirectory) {
+        el.moveItemError.textContent = '请选择目标目录';
+        el.moveItemError.style.display = 'block';
+        return;
+    }
+
+    try {
+        el.moveItemConfirmBtn.disabled = true;
+        el.moveItemConfirmBtn.textContent = '移动中...';
+
+        const response = await authFetch('/api/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                source_path: moveItemSourcePath,
+                target_directory: targetDirectory
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok || !data.success) {
+            el.moveItemError.textContent = data.error || '移动失败';
+            el.moveItemError.style.display = 'block';
+            return;
+        }
+
+        const movedFrom = moveItemSourcePath;
+        const movedTo = data.destination_path;
+        const wasCurrentFile = currentPath && currentPath === movedFrom;
+        const currentFileInsideMovedDir = moveItemType === 'directory' && currentPath && currentPath.startsWith(`${movedFrom}/`);
+
+        const movedType = moveItemType;
+        closeMoveItemModal();
+        saveExpandedState();
+        const expandedPaths = getExpandedPaths();
+        expandedPaths.add(targetDirectory);
+        localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+        await loadDirectories();
+
+        if (wasCurrentFile) {
+            await loadFile(movedTo);
+        } else if (currentFileInsideMovedDir) {
+            const suffix = currentPath.slice(movedFrom.length);
+            await loadFile(`${movedTo}${suffix}`);
+        } else if (currentPath) {
+            highlightTreeItem(currentPath);
+        }
+
+        showToast(movedType === 'directory' ? 'Directory moved successfully' : 'File moved successfully');
+    } catch (error) {
+        console.error('Move item failed:', error);
+        el.moveItemError.textContent = '移动失败';
+        el.moveItemError.style.display = 'block';
+    } finally {
+        el.moveItemConfirmBtn.disabled = false;
+        el.moveItemConfirmBtn.textContent = '移动';
+    }
+}
+
+// ========================================
 // Create File Modal
 // ========================================
 
@@ -2841,14 +3549,11 @@ async function confirmCreateDir() {
             showToast('Directory created successfully');
             closeCreateDirModal();
 
-            // Save expanded state before reload
             saveExpandedState();
-
-            // Add new directory to expanded paths
             const expandedPaths = getExpandedPaths();
             expandedPaths.add(createDirParentPath);
+            localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
 
-            // Reload directories to update tree
             await loadDirectories();
         } else {
             el.createDirError.textContent = data.error || 'Failed to create directory';

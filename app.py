@@ -4,6 +4,7 @@
 import os
 import re
 import json
+import shutil
 import yaml
 import hashlib
 import jwt
@@ -19,6 +20,10 @@ from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from flask import Flask, render_template, jsonify, request, Response
 import markdown
+
+from illustrator.core import ArticleIllustratorService
+from illustrator.settings import IllustratorSettingsStore, public_settings
+from illustrator.storage import IllustratorJobStore
 
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -45,6 +50,9 @@ config = load_config()
 # 目录配置文件路径
 DIRECTORIES_FILE = Path(__file__).parent / 'directories.json'
 SHARE_LINKS_FILE = Path(__file__).parent / 'share_links.json'
+ILLUSTRATOR_DB_FILE = Path(__file__).parent / 'illustrator.sqlite3'
+illustrator_settings_store = IllustratorSettingsStore(ILLUSTRATOR_DB_FILE)
+illustrator_job_store = IllustratorJobStore(ILLUSTRATOR_DB_FILE)
 
 def load_directories_config():
     """加载目录配置，优先从 directories.json，否则从 config.yaml"""
@@ -89,6 +97,51 @@ def is_path_in_directories(target_path, directories=None):
 
     return False
 
+def validate_move_paths(source_path, target_directory):
+    """Validate a move operation and return the final destination path."""
+    source_path = expand_path(source_path)
+    target_directory = expand_path(target_directory)
+
+    if not is_path_in_directories(source_path):
+        return None, ('无权限访问源路径', 403)
+
+    if not is_path_in_directories(target_directory):
+        return None, ('无权限移动到目标目录', 403)
+
+    if not source_path.exists():
+        return None, ('源路径不存在', 404)
+
+    if not target_directory.exists():
+        return None, ('目标目录不存在', 404)
+
+    if not target_directory.is_dir():
+        return None, ('目标路径不是目录', 400)
+
+    destination_path = target_directory / source_path.name
+
+    if source_path == destination_path:
+        return None, ('源路径和目标路径相同', 400)
+
+    if destination_path.exists():
+        return None, ('目标目录中已存在同名文件或目录', 409)
+
+    if source_path.is_dir():
+        try:
+            target_directory.relative_to(source_path)
+            return None, ('不能将目录移动到其自身或子目录中', 400)
+        except ValueError:
+            pass
+
+    return destination_path, None
+
+
+illustrator_service = ArticleIllustratorService(
+    illustrator_settings_store,
+    illustrator_job_store,
+    is_path_in_directories,
+    config.get('illustrator', {}),
+)
+
 def serialize_datetime(value):
     """Return an ISO timestamp string in UTC."""
     return value.replace(microsecond=0).isoformat() + 'Z'
@@ -118,6 +171,40 @@ def save_share_links(links):
     """Persist share-link metadata to local JSON storage."""
     with open(SHARE_LINKS_FILE, 'w', encoding='utf-8') as f:
         json.dump(links, f, ensure_ascii=False, indent=2)
+
+def update_share_links_for_move(source_path, destination_path):
+    """Keep share-link paths in sync after moving a file or directory."""
+    source_path = expand_path(source_path)
+    destination_path = expand_path(destination_path)
+    links = load_share_links()
+    changed = False
+
+    for link in links:
+        link_path_raw = link.get('path', '')
+        if not link_path_raw:
+            continue
+
+        link_path = expand_path(link_path_raw)
+        new_link_path = None
+
+        if link_path == source_path:
+            new_link_path = destination_path
+        elif source_path.is_dir():
+            try:
+                relative = link_path.relative_to(source_path)
+                new_link_path = destination_path / relative
+            except ValueError:
+                continue
+        else:
+            continue
+
+        link['path'] = str(new_link_path)
+        link['display_path'] = simplify_path(new_link_path)
+        link['title'] = new_link_path.name
+        changed = True
+
+    if changed:
+        save_share_links(links)
 
 def public_share_data(link):
     """Return non-sensitive share-link fields for API responses."""
@@ -404,61 +491,94 @@ def login_required(f):
 
     return decorated_function
 
-# 获取目录树
-def get_directory_tree(path, name, file_types=None, _visited=None):
-    """获取目录树
+# 获取目录层级
 
-    Args:
-        path: 目录路径
-        name: 显示名称
-        file_types: 要包含的文件类型列表，如 ['.md', '.txt', '.json']
-        _visited: 已访问的路径集合（用于防止循环引用）
-    """
+def build_directory_node(path, name=None, children=None, is_loaded=False, has_children=False, is_empty=False):
+    path = expand_path(path)
+    return {
+        'name': name or path.name,
+        'path': simplify_path(path),
+        'type': 'directory',
+        'children': children or [],
+        'children_loaded': is_loaded,
+        'has_children': has_children,
+        'is_empty': is_empty
+    }
+
+
+def directory_has_visible_children(path, file_types=None):
+    """检查目录是否包含可见的直接子项。"""
     if file_types is None:
         file_types = ['.md']
 
     path = expand_path(path)
-    if not path.exists():
+    if not path.exists() or not path.is_dir():
+        return False
+
+    normalized_file_types = {file_type.lower() for file_type in file_types}
+
+    try:
+        for item in path.iterdir():
+            if item.name.startswith('.'):
+                continue
+            if item.is_dir():
+                return True
+            if item.suffix.lower() in normalized_file_types:
+                return True
+    except (PermissionError, OSError):
+        return False
+
+    return False
+
+
+def get_directory_listing(path, name=None, file_types=None):
+    """获取目录自身及其直接 children。"""
+    if file_types is None:
+        file_types = ['.md']
+
+    path = expand_path(path)
+    if not path.exists() or not path.is_dir():
         return None
-
-    # 防止循环引用
-    if _visited is None:
-        _visited = set()
-
-    # 将绝对路径加入已访问集合
-    abs_path = str(path.resolve())
-    if abs_path in _visited:
-        return None
-    _visited.add(abs_path)
-
-    tree = {
-        'name': name,
-        'path': simplify_path(path),
-        'type': 'directory',
-        'children': []
-    }
 
     try:
         items = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-        for item in items:
-            if item.name.startswith('.'):
-                continue
+    except (PermissionError, OSError):
+        items = []
 
-            if item.is_dir():
-                child_tree = get_directory_tree(str(item), item.name, file_types, _visited)
-                if child_tree:
-                    tree['children'].append(child_tree)
-            elif item.suffix.lower() in [f.lower() for f in file_types]:
-                tree['children'].append({
-                    'name': item.name,
-                    'path': simplify_path(item),
-                    'type': 'file',
-                    'ext': item.suffix.lower()
-                })
-    except PermissionError:
-        pass
+    normalized_file_types = {file_type.lower() for file_type in file_types}
+    children = []
 
-    return tree
+    for item in items:
+        if item.name.startswith('.'):
+            continue
+
+        if item.is_dir():
+            child_has_children = directory_has_visible_children(item, file_types)
+            children.append(build_directory_node(
+                item,
+                name=item.name,
+                children=[],
+                is_loaded=False,
+                has_children=child_has_children,
+                is_empty=not child_has_children
+            ))
+        elif item.suffix.lower() in normalized_file_types:
+            children.append({
+                'name': item.name,
+                'path': simplify_path(item),
+                'type': 'file',
+                'ext': item.suffix.lower()
+            })
+
+    has_children = len(children) > 0
+    return build_directory_node(
+        path,
+        name=name or path.name,
+        children=children,
+        is_loaded=True,
+        has_children=has_children,
+        is_empty=not has_children
+    )
 
 # 读取 Markdown 文件
 def read_markdown_file(file_path):
@@ -712,10 +832,11 @@ def api_revoke_share_link(link_id):
 @login_required
 def api_directories():
     # 获取文件类型参数
-    file_types = ['.md']  # 默认显示文档和图片
+    file_types = ['.md']
     show_txt = request.args.get('txt', 'false').lower() == 'true'
     show_json = request.args.get('json', 'false').lower() == 'true'
     show_images = request.args.get('images', 'true').lower() == 'true'
+    target_path = request.args.get('path')
 
     if show_txt:
         file_types.append('.txt')
@@ -724,9 +845,23 @@ def api_directories():
     if show_images:
         file_types.extend(sorted(IMAGE_EXTENSIONS))
 
+    if target_path:
+        target_dir = expand_path(target_path)
+        if not is_path_in_directories(target_dir):
+            return jsonify({'error': '无权限访问该目录'}), 403
+        if not target_dir.exists():
+            return jsonify({'error': '目录不存在'}), 404
+        if not target_dir.is_dir():
+            return jsonify({'error': '目标路径不是目录'}), 400
+
+        tree = get_directory_listing(target_dir, file_types=file_types)
+        if tree is None:
+            return jsonify({'error': '目录不存在'}), 404
+        return jsonify(tree.get('children', []))
+
     trees = []
     for directory in load_directories_config():
-        tree = get_directory_tree(directory['path'], directory['name'], file_types)
+        tree = get_directory_listing(directory['path'], directory['name'], file_types)
         if tree:
             trees.append(tree)
     return jsonify(trees)
@@ -758,6 +893,131 @@ def api_render():
         html_content = render_markdown(content)
 
     return jsonify({'content': html_content})
+
+
+@app.route('/api/ai-settings', methods=['GET', 'PUT'])
+@login_required
+def api_ai_settings():
+    """Read or update AI settings for article illustration."""
+    if request.method == 'GET':
+        settings = illustrator_settings_store.load(config.get('illustrator', {}))
+        return jsonify(public_settings(settings))
+
+    data = request.get_json() or {}
+    settings = illustrator_settings_store.save(data, config.get('illustrator', {}))
+    return jsonify(public_settings(settings))
+
+
+@app.route('/api/ai-settings/test', methods=['POST'])
+@login_required
+def api_ai_settings_test():
+    """Validate configured text and image providers."""
+    data = request.get_json() or {}
+    try:
+        result = illustrator_service.test_settings(data)
+        return jsonify(result), 200 if result.get('ok') else 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.route('/api/illustrator/analyze', methods=['POST'])
+@login_required
+def api_illustrator_analyze():
+    """Analyze a Markdown article and propose illustration settings."""
+    data = request.get_json() or {}
+    file_path = data.get('path')
+    if not file_path:
+        return jsonify({'error': '缺少文件路径'}), 400
+
+    try:
+        analysis = illustrator_service.analyze(expand_path(file_path), data.get('settings') or {})
+        return jsonify({'analysis': analysis})
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except (FileNotFoundError, ValueError) as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'分析失败: {str(e)}'}), 500
+
+
+@app.route('/api/illustrator/jobs', methods=['POST'])
+@login_required
+def api_illustrator_jobs():
+    """Create an article illustration job."""
+    data = request.get_json() or {}
+    file_path = data.get('path')
+    if not file_path:
+        return jsonify({'error': '缺少文件路径'}), 400
+
+    try:
+        job_id = illustrator_service.create_job(
+            expand_path(file_path),
+            data.get('settings') or {},
+            data.get('analysis'),
+        )
+        return jsonify({'job_id': job_id}), 201
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except (FileNotFoundError, ValueError) as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'任务创建失败: {str(e)}'}), 500
+
+
+@app.route('/api/illustrator/jobs/<job_id>', methods=['GET'])
+@login_required
+def api_illustrator_job(job_id):
+    job = illustrator_job_store.get(job_id)
+    if not job:
+        return jsonify({'error': '任务不存在'}), 404
+    if not is_path_in_directories(job.get('path', '')):
+        return jsonify({'error': '无权限访问该任务'}), 403
+    return jsonify(job)
+
+
+@app.route('/api/illustrator/jobs/<job_id>/cancel', methods=['POST'])
+@login_required
+def api_illustrator_cancel_job(job_id):
+    job = illustrator_job_store.get(job_id)
+    if not job:
+        return jsonify({'error': '任务不存在'}), 404
+    if not is_path_in_directories(job.get('path', '')):
+        return jsonify({'error': '无权限访问该任务'}), 403
+    illustrator_job_store.request_cancel(job_id)
+    return jsonify({'success': True})
+
+
+@app.route('/api/illustrator/jobs/<job_id>/preview', methods=['GET'])
+@login_required
+def api_illustrator_preview(job_id):
+    job = illustrator_job_store.get(job_id)
+    if not job:
+        return jsonify({'error': '任务不存在'}), 404
+    if not is_path_in_directories(job.get('path', '')):
+        return jsonify({'error': '无权限访问该任务'}), 403
+    try:
+        result = illustrator_service.preview(job_id)
+        return jsonify(result or {})
+    except Exception as e:
+        return jsonify({'error': f'预览失败: {str(e)}'}), 500
+
+
+@app.route('/api/illustrator/jobs/<job_id>/apply', methods=['POST'])
+@login_required
+def api_illustrator_apply(job_id):
+    job = illustrator_job_store.get(job_id)
+    if not job:
+        return jsonify({'error': '任务不存在'}), 404
+    if not is_path_in_directories(job.get('path', '')):
+        return jsonify({'error': '无权限访问该任务'}), 403
+    try:
+        return jsonify(illustrator_service.apply(job_id))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except Exception as e:
+        return jsonify({'error': f'应用失败: {str(e)}'}), 500
 
 @app.route('/api/file', methods=['GET', 'POST', 'DELETE', 'PUT'])
 @login_required
@@ -962,11 +1222,46 @@ def api_directory():
         return jsonify({'error': '路径不是目录'}), 400
 
     try:
-        import shutil
         shutil.rmtree(dir_path)
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': f'删除目录失败: {str(e)}'}), 500
+
+@app.route('/api/move', methods=['POST'])
+@login_required
+def api_move():
+    """Move a file or directory into an existing directory."""
+    data = request.get_json() or {}
+    source_path = data.get('source_path')
+    target_directory = data.get('target_directory')
+
+    if not source_path:
+        return jsonify({'error': '缺少源路径'}), 400
+
+    if not target_directory:
+        return jsonify({'error': '缺少目标目录'}), 400
+
+    destination_path, error = validate_move_paths(source_path, target_directory)
+    if error:
+        message, status = error
+        return jsonify({'error': message}), status
+
+    source_path = expand_path(source_path)
+
+    try:
+        source_type = 'directory' if source_path.is_dir() else 'file'
+        source_path.rename(destination_path)
+        update_share_links_for_move(source_path, destination_path)
+        return jsonify({
+            'success': True,
+            'type': source_type,
+            'source_path': simplify_path(source_path),
+            'target_directory': simplify_path(expand_path(target_directory)),
+            'destination_path': simplify_path(destination_path),
+            'name': destination_path.name
+        })
+    except Exception as e:
+        return jsonify({'error': f'移动失败: {str(e)}'}), 500
 
 # 读取文本文件（txt, json等）
 def read_text_file(file_path, file_ext):
