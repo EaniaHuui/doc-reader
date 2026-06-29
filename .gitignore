@@ -45,6 +45,7 @@ logs/
 config.yaml
 directories.json
 share_links.json
+illustrator.sqlite3
 server.log
 docs/brainstorms/
 docs/plans/
