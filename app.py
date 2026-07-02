@@ -21,10 +21,6 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 from flask import Flask, render_template, jsonify, request, Response
 import markdown
 
-from illustrator.core import ArticleIllustratorService
-from illustrator.settings import IllustratorSettingsStore, public_settings
-from illustrator.storage import IllustratorJobStore
-
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
@@ -50,10 +46,6 @@ config = load_config()
 # 目录配置文件路径
 DIRECTORIES_FILE = Path(__file__).parent / 'directories.json'
 SHARE_LINKS_FILE = Path(__file__).parent / 'share_links.json'
-ILLUSTRATOR_DB_FILE = Path(__file__).parent / 'illustrator.sqlite3'
-illustrator_settings_store = IllustratorSettingsStore(ILLUSTRATOR_DB_FILE)
-illustrator_job_store = IllustratorJobStore(ILLUSTRATOR_DB_FILE)
-
 def load_directories_config():
     """加载目录配置，优先从 directories.json，否则从 config.yaml"""
     if DIRECTORIES_FILE.exists():
@@ -134,13 +126,6 @@ def validate_move_paths(source_path, target_directory):
 
     return destination_path, None
 
-
-illustrator_service = ArticleIllustratorService(
-    illustrator_settings_store,
-    illustrator_job_store,
-    is_path_in_directories,
-    config.get('illustrator', {}),
-)
 
 def serialize_datetime(value):
     """Return an ISO timestamp string in UTC."""
@@ -894,130 +879,6 @@ def api_render():
 
     return jsonify({'content': html_content})
 
-
-@app.route('/api/ai-settings', methods=['GET', 'PUT'])
-@login_required
-def api_ai_settings():
-    """Read or update AI settings for article illustration."""
-    if request.method == 'GET':
-        settings = illustrator_settings_store.load(config.get('illustrator', {}))
-        return jsonify(public_settings(settings))
-
-    data = request.get_json() or {}
-    settings = illustrator_settings_store.save(data, config.get('illustrator', {}))
-    return jsonify(public_settings(settings))
-
-
-@app.route('/api/ai-settings/test', methods=['POST'])
-@login_required
-def api_ai_settings_test():
-    """Validate configured text and image providers."""
-    data = request.get_json() or {}
-    try:
-        result = illustrator_service.test_settings(data)
-        return jsonify(result), 200 if result.get('ok') else 400
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 400
-
-
-@app.route('/api/illustrator/analyze', methods=['POST'])
-@login_required
-def api_illustrator_analyze():
-    """Analyze a Markdown article and propose illustration settings."""
-    data = request.get_json() or {}
-    file_path = data.get('path')
-    if not file_path:
-        return jsonify({'error': '缺少文件路径'}), 400
-
-    try:
-        analysis = illustrator_service.analyze(expand_path(file_path), data.get('settings') or {})
-        return jsonify({'analysis': analysis})
-    except PermissionError as e:
-        return jsonify({'error': str(e)}), 403
-    except (FileNotFoundError, ValueError) as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'分析失败: {str(e)}'}), 500
-
-
-@app.route('/api/illustrator/jobs', methods=['POST'])
-@login_required
-def api_illustrator_jobs():
-    """Create an article illustration job."""
-    data = request.get_json() or {}
-    file_path = data.get('path')
-    if not file_path:
-        return jsonify({'error': '缺少文件路径'}), 400
-
-    try:
-        job_id = illustrator_service.create_job(
-            expand_path(file_path),
-            data.get('settings') or {},
-            data.get('analysis'),
-        )
-        return jsonify({'job_id': job_id}), 201
-    except PermissionError as e:
-        return jsonify({'error': str(e)}), 403
-    except (FileNotFoundError, ValueError) as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'任务创建失败: {str(e)}'}), 500
-
-
-@app.route('/api/illustrator/jobs/<job_id>', methods=['GET'])
-@login_required
-def api_illustrator_job(job_id):
-    job = illustrator_job_store.get(job_id)
-    if not job:
-        return jsonify({'error': '任务不存在'}), 404
-    if not is_path_in_directories(job.get('path', '')):
-        return jsonify({'error': '无权限访问该任务'}), 403
-    return jsonify(job)
-
-
-@app.route('/api/illustrator/jobs/<job_id>/cancel', methods=['POST'])
-@login_required
-def api_illustrator_cancel_job(job_id):
-    job = illustrator_job_store.get(job_id)
-    if not job:
-        return jsonify({'error': '任务不存在'}), 404
-    if not is_path_in_directories(job.get('path', '')):
-        return jsonify({'error': '无权限访问该任务'}), 403
-    illustrator_job_store.request_cancel(job_id)
-    return jsonify({'success': True})
-
-
-@app.route('/api/illustrator/jobs/<job_id>/preview', methods=['GET'])
-@login_required
-def api_illustrator_preview(job_id):
-    job = illustrator_job_store.get(job_id)
-    if not job:
-        return jsonify({'error': '任务不存在'}), 404
-    if not is_path_in_directories(job.get('path', '')):
-        return jsonify({'error': '无权限访问该任务'}), 403
-    try:
-        result = illustrator_service.preview(job_id)
-        return jsonify(result or {})
-    except Exception as e:
-        return jsonify({'error': f'预览失败: {str(e)}'}), 500
-
-
-@app.route('/api/illustrator/jobs/<job_id>/apply', methods=['POST'])
-@login_required
-def api_illustrator_apply(job_id):
-    job = illustrator_job_store.get(job_id)
-    if not job:
-        return jsonify({'error': '任务不存在'}), 404
-    if not is_path_in_directories(job.get('path', '')):
-        return jsonify({'error': '无权限访问该任务'}), 403
-    try:
-        return jsonify(illustrator_service.apply(job_id))
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except PermissionError as e:
-        return jsonify({'error': str(e)}), 403
-    except Exception as e:
-        return jsonify({'error': f'应用失败: {str(e)}'}), 500
 
 @app.route('/api/file', methods=['GET', 'POST', 'DELETE', 'PUT'])
 @login_required

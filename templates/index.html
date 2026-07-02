@@ -127,20 +127,6 @@
                     </svg>
                     <span>Directories</span>
                 </button>
-                <button class="sidebar-footer-btn" id="aiSettingsBtn" title="AI settings">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2v4"/>
-                        <path d="M12 18v4"/>
-                        <path d="M4.93 4.93l2.83 2.83"/>
-                        <path d="M16.24 16.24l2.83 2.83"/>
-                        <path d="M2 12h4"/>
-                        <path d="M18 12h4"/>
-                        <path d="M4.93 19.07l2.83-2.83"/>
-                        <path d="M16.24 7.76l2.83-2.83"/>
-                        <circle cx="12" cy="12" r="3"/>
-                    </svg>
-                    <span>AI Settings</span>
-                </button>
                 <button class="sidebar-footer-btn" id="authBtn" title="Login">
                     <svg class="icon-login" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
@@ -243,14 +229,6 @@
                             <circle cx="18" cy="19" r="3"/>
                             <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
                             <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-                        </svg>
-                    </button>
-                    <button class="topbar-btn" id="illustratorBtn" title="Illustrate article" disabled aria-label="Illustrate article">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="3" y="3" width="18" height="18" rx="2"/>
-                            <circle cx="8.5" cy="8.5" r="1.5"/>
-                            <path d="M21 15l-5-5L5 21"/>
-                            <path d="M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1 1-2z"/>
                         </svg>
                     </button>
                     <button class="topbar-btn" id="sourceToggle" title="View source">
@@ -788,217 +766,6 @@
         </div>
     </div>
 
-    <!-- AI Settings Modal -->
-    <div class="modal" id="aiSettingsModal">
-        <div class="modal-backdrop"></div>
-        <div class="modal-content ai-settings-content">
-            <div class="modal-header">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="3"/>
-                    <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
-                    <path d="M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-                </svg>
-                <span>AI Settings</span>
-                <button class="modal-close" id="closeAiSettings">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="18" y1="6" x2="6" y2="18"/>
-                        <line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                </button>
-            </div>
-            <div class="modal-body">
-                <form id="aiSettingsForm" class="settings-grid">
-                    <label class="form-group">
-                        <span>Text Provider</span>
-                        <select id="aiTextProvider">
-                            <option value="openai-compatible">OpenAI-compatible</option>
-                            <option value="mock">Mock</option>
-                        </select>
-                    </label>
-                    <label class="form-group">
-                        <span>Text Model</span>
-                        <input type="text" id="aiTextModel" placeholder="gpt-4.1-mini">
-                    </label>
-                    <label class="form-group form-group-wide">
-                        <span>Text Base URL</span>
-                        <input type="text" id="aiTextBaseUrl" placeholder="https://api.openai.com/v1">
-                    </label>
-                    <label class="form-group">
-                        <span>Text API Key Env</span>
-                        <input type="text" id="aiTextApiKeyEnv" placeholder="OPENAI_API_KEY">
-                    </label>
-                    <label class="form-group">
-                        <span>Image Provider</span>
-                        <select id="aiImageProvider">
-                            <option value="openai-compatible">OpenAI-compatible</option>
-                            <option value="custom-command">Custom Command</option>
-                            <option value="mock">Mock</option>
-                        </select>
-                    </label>
-                    <label class="form-group">
-                        <span>Image Model</span>
-                        <input type="text" id="aiImageModel" placeholder="gpt-image-1">
-                    </label>
-                    <label class="form-group form-group-wide">
-                        <span>Image Base URL</span>
-                        <input type="text" id="aiImageBaseUrl" placeholder="https://api.openai.com/v1">
-                    </label>
-                    <label class="form-group">
-                        <span>Image API Key Env</span>
-                        <input type="text" id="aiImageApiKeyEnv" placeholder="OPENAI_API_KEY">
-                    </label>
-                    <label class="form-group">
-                        <span>Image Size</span>
-                        <select id="aiImageSize">
-                            <option value="auto">auto</option>
-                            <option value="1024x1024">1024x1024</option>
-                            <option value="1536x1024">1536x1024</option>
-                            <option value="1024x1536">1024x1536</option>
-                        </select>
-                    </label>
-                    <label class="form-group">
-                        <span>Image Quality</span>
-                        <select id="aiImageQuality">
-                            <option value="auto">auto</option>
-                            <option value="low">low</option>
-                            <option value="medium">medium</option>
-                            <option value="high">high</option>
-                        </select>
-                    </label>
-                    <label class="form-group form-group-wide">
-                        <span>Custom Image Command</span>
-                        <input type="text" id="aiCustomImageCommand" placeholder="Reads PROMPT_FILE and writes OUTPUT_FILE">
-                    </label>
-                    <label class="form-group">
-                        <span>Default Preset</span>
-                        <select id="aiDefaultPreset">
-                            <option value="hand-drawn-edu">hand-drawn-edu</option>
-                            <option value="minimal-flat">minimal-flat</option>
-                            <option value="sci-fi-blueprint">sci-fi-blueprint</option>
-                            <option value="editorial-flow">editorial-flow</option>
-                        </select>
-                    </label>
-                    <label class="form-group">
-                        <span>Default Density</span>
-                        <select id="aiDefaultDensity">
-                            <option value="minimal">minimal</option>
-                            <option value="balanced">balanced</option>
-                            <option value="per-section">per-section</option>
-                            <option value="rich">rich</option>
-                        </select>
-                    </label>
-                    <label class="form-group">
-                        <span>Output Directory</span>
-                        <select id="aiDefaultOutputDir">
-                            <option value="imgs-subdir">article/imgs</option>
-                            <option value="same-dir">same directory</option>
-                            <option value="illustrations-subdir">article/illustrations</option>
-                            <option value="independent">workspace illustrations</option>
-                        </select>
-                    </label>
-                    <label class="form-group">
-                        <span>Batch Size</span>
-                        <input type="number" id="aiBatchSize" min="1" max="8">
-                    </label>
-                    <label class="form-group">
-                        <span>Timeout Seconds</span>
-                        <input type="number" id="aiTimeoutSeconds" min="10" max="600">
-                    </label>
-                    <label class="form-group">
-                        <span>Retry Count</span>
-                        <input type="number" id="aiRetryCount" min="0" max="3">
-                    </label>
-                </form>
-                <div class="settings-status" id="aiSettingsStatus"></div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn-secondary" id="testAiSettingsBtn">Test Connection</button>
-                <button class="btn-secondary" id="cancelAiSettingsBtn">Cancel</button>
-                <button class="btn-primary" id="saveAiSettingsBtn">Save</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Article Illustrator Modal -->
-    <div class="modal" id="illustratorModal">
-        <div class="modal-backdrop"></div>
-        <div class="modal-content illustrator-content">
-            <div class="modal-header">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="3" y="3" width="18" height="18" rx="2"/>
-                    <circle cx="8.5" cy="8.5" r="1.5"/>
-                    <path d="M21 15l-5-5L5 21"/>
-                    <path d="M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1 1-2z"/>
-                </svg>
-                <span>Article Illustrator</span>
-                <button class="modal-close" id="closeIllustrator">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="18" y1="6" x2="6" y2="18"/>
-                        <line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                </button>
-            </div>
-            <div class="modal-body">
-                <div class="illustrator-layout">
-                    <div class="illustrator-panel">
-                        <div class="illustrator-section-title">Settings</div>
-                        <div class="settings-grid compact">
-                            <label class="form-group">
-                                <span>Preset</span>
-                                <select id="illustratorPreset">
-                                    <option value="hand-drawn-edu">hand-drawn-edu</option>
-                                    <option value="minimal-flat">minimal-flat</option>
-                                    <option value="sci-fi-blueprint">sci-fi-blueprint</option>
-                                    <option value="editorial-flow">editorial-flow</option>
-                                </select>
-                            </label>
-                            <label class="form-group">
-                                <span>Density</span>
-                                <select id="illustratorDensity">
-                                    <option value="minimal">minimal</option>
-                                    <option value="balanced">balanced</option>
-                                    <option value="per-section">per-section</option>
-                                    <option value="rich">rich</option>
-                                </select>
-                            </label>
-                            <label class="form-group">
-                                <span>Output</span>
-                                <select id="illustratorOutputDir">
-                                    <option value="imgs-subdir">article/imgs</option>
-                                    <option value="same-dir">same directory</option>
-                                    <option value="illustrations-subdir">article/illustrations</option>
-                                    <option value="independent">workspace illustrations</option>
-                                </select>
-                            </label>
-                        </div>
-                        <div class="illustrator-actions">
-                            <button class="btn-secondary" id="analyzeIllustratorBtn">Analyze</button>
-                            <button class="btn-primary" id="startIllustratorBtn" disabled>Generate</button>
-                            <button class="btn-secondary" id="cancelIllustratorJobBtn" style="display: none;">Cancel Job</button>
-                        </div>
-                        <div class="illustrator-progress">
-                            <div class="progress-bar"><div id="illustratorProgressFill"></div></div>
-                            <div class="progress-text" id="illustratorProgressText">Ready</div>
-                        </div>
-                        <div class="illustrator-log" id="illustratorLog"></div>
-                    </div>
-                    <div class="illustrator-panel">
-                        <div class="illustrator-section-title">Plan</div>
-                        <div id="illustratorAnalysis" class="illustrator-analysis empty-state">Run analysis to preview illustration positions.</div>
-                    </div>
-                    <div class="illustrator-panel illustrator-preview-panel">
-                        <div class="illustrator-section-title">Preview</div>
-                        <div id="illustratorPreview" class="illustrator-preview empty-state">Generated images and Markdown diff will appear here.</div>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn-secondary" id="closeIllustratorFooterBtn">Close</button>
-                <button class="btn-primary" id="applyIllustratorBtn" disabled>Apply to Article</button>
-            </div>
-        </div>
-    </div>
-
     <!-- Toast -->
     <div class="toast" id="toast"></div>
 
@@ -1006,6 +773,6 @@
     <script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
     <!-- App Script -->
-    <script src="{{ url_for('static', filename='script.js') }}?v=35"></script>
+    <script src="{{ url_for('static', filename='script.js') }}?v=36"></script>
 </body>
 </html>
