@@ -753,7 +753,7 @@ function renderDirectoryTree() {
     updateExpandAllButton();
 
     if (currentPath) {
-        highlightTreeItem(currentPath);
+        highlightTreeItem(currentPath, {scrollIntoView: false});
     }
 }
 
@@ -1569,7 +1569,7 @@ async function loadFile(filePath, fileName) {
         generateTOC();
 
         // Highlight and expand tree to show current file
-        highlightTreeItem(filePath);
+        highlightTreeItem(filePath, {scrollIntoView: true});
 
         // Update URL without reloading
         const newUrl = new URL(window.location);
@@ -2627,7 +2627,8 @@ function resolveRelativePath(baseDir, relativePath) {
 // Tree Highlight
 // ========================================
 
-function highlightTreeItem(filePath) {
+function highlightTreeItem(filePath, options = {}) {
+    const {scrollIntoView = false} = options;
     document.querySelectorAll('.tree-row.active').forEach(r => {
         r.classList.remove('active');
     });
@@ -2645,7 +2646,9 @@ function highlightTreeItem(filePath) {
     if (!targetRow) return;
 
     targetRow.classList.add('active');
-    targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (scrollIntoView) {
+        targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
 }
 
 // ========================================
@@ -2945,7 +2948,7 @@ async function confirmMoveItem() {
             const suffix = currentPath.slice(movedFrom.length);
             await loadFile(`${movedTo}${suffix}`);
         } else if (currentPath) {
-            highlightTreeItem(currentPath);
+            highlightTreeItem(currentPath, {scrollIntoView: false});
         }
 
         showToast(movedType === 'directory' ? 'Directory moved successfully' : 'File moved successfully');
