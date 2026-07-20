@@ -1,0 +1,40 @@
+# Doc Reader — systemd unit example
+#
+# 安装:
+#   1. 确认仓库路径、用户名
+#   2. sudo cp deploy/doc-reader.service.example /etc/systemd/system/doc-reader.service
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now doc-reader
+#   5. sudo systemctl status doc-reader
+#
+# 配合 nginx 反代见 deploy/nginx.example.conf
+
+[Unit]
+Description=Doc Reader (gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=zhuhui
+Group=zhuhui
+WorkingDirectory=/home/zhuhui/project/markdown-reader
+Environment=PATH=/home/zhuhui/project/markdown-reader/venv/bin
+Environment=WEB_CONCURRENCY=2
+# 生产模式
+ExecStart=/home/zhuhui/project/markdown-reader/venv/bin/gunicorn \
+    --bind 127.0.0.1:5000 \
+    --workers 2 \
+    --threads 2 \
+    --timeout 60 \
+    --access-logfile - \
+    --error-logfile - \
+    app:app
+Restart=on-failure
+RestartSec=3
+
+# 安全加固（按需）
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

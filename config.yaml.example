@@ -22,8 +22,12 @@ auth:
   token_expiration_hours: 720  # Token 过期时间（小时）
   users:
     - username: change-me
+      # hashed: false 时启动会用 PBKDF2 派生哈希（推荐）
+      # hashed: true 时 password 可为：
+      #   - pbkdf2_sha256$iterations$salt$hash
+      #   - 旧版 64 位 SHA-256 十六进制
       password: change-me-too
-      hashed: false  # true 表示 password 字段存储的是哈希值
+      hashed: false
 
 # 功能开关
 features:

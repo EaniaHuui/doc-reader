@@ -1,240 +1,73 @@
 #!/usr/bin/env python3
-"""Doc Reader - 轻量级文档阅读器"""
+"""Doc Reader - 轻量级文档阅读器
 
-import os
-import re
+Route layer only. Business logic lives under the `reader` package.
+"""
+
+from __future__ import annotations
+
 import json
-import shutil
-import yaml
-import hashlib
-import jwt
-import html
+import re
 import secrets
-import ipaddress
-import socket
-from copy import deepcopy
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from functools import wraps
-from urllib.parse import quote, unquote, urlparse
-from urllib.request import Request, build_opener, HTTPRedirectHandler
-from flask import Flask, render_template, jsonify, request, Response
-import markdown
+from urllib.parse import quote, unquote
+from urllib.request import Request, build_opener
+
+from flask import Flask, Response, jsonify, render_template, request, send_file, abort
+import html
+
+from reader.auth import (
+    clear_login_failures,
+    decode_token,
+    generate_token,
+    get_users,
+    is_auth_enabled,
+    is_login_rate_limited,
+    login_required,
+    record_login_failure,
+    verify_password,
+)
+from reader.constants import (
+    IMAGE_EXTENSIONS,
+    REMOTE_IMAGE_MAX_BYTES,
+    REMOTE_IMAGE_TIMEOUT_SECONDS,
+)
+from reader.fs_ops import (
+    get_directory_listing,
+    read_text_file,
+    search_files,
+)
+from reader.markdown_utils import (
+    read_markdown_file,
+    render_image_file,
+    render_markdown,
+    rewrite_shared_image_urls,
+)
+from reader.paths import expand_path, is_path_in_directories, simplify_path, validate_move_paths
+from reader.security import SafeRedirectHandler, is_public_remote_url
+from reader.share import (
+    find_share_link,
+    increment_share_view,
+    is_share_link_active,
+    public_share_data,
+    serialize_datetime,
+    update_share_links_for_move,
+)
+from reader.storage import (
+    get_config,
+    load_directories_config,
+    load_share_links,
+    save_directories_config,
+    save_share_links,
+)
 
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
-MARKDOWN_EXTENSIONS = [
-    'extra',
-    'codehilite',
-    'toc',
-    'fenced_code',
-]
+config = get_config()
 
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'}
-REMOTE_IMAGE_MAX_BYTES = 10 * 1024 * 1024
-REMOTE_IMAGE_TIMEOUT_SECONDS = 8
-
-# 加载配置
-def load_config():
-    config_path = Path(__file__).parent / 'config.yaml'
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
-
-config = load_config()
-
-# 目录配置文件路径
-DIRECTORIES_FILE = Path(__file__).parent / 'directories.json'
-SHARE_LINKS_FILE = Path(__file__).parent / 'share_links.json'
-def load_directories_config():
-    """加载目录配置，优先从 directories.json，否则从 config.yaml"""
-    if DIRECTORIES_FILE.exists():
-        try:
-            with open(DIRECTORIES_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            pass
-    # 从 config.yaml 读取默认配置
-    return config.get('directories', [])
-
-def save_directories_config(directories):
-    """保存目录配置到 directories.json"""
-    with open(DIRECTORIES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(directories, f, ensure_ascii=False, indent=2)
-
-# 展开路径中的 ~ 为用户目录
-def expand_path(path):
-    return Path(path).expanduser().resolve()
-
-# 简化路径显示（将用户主目录显示为 ~）
-def simplify_path(path):
-    path_str = str(path)
-    home = str(Path.home())
-    if path_str.startswith(home):
-        return path_str.replace(home, '~', 1)
-    return path_str
-
-def is_path_in_directories(target_path, directories=None):
-    """检查路径是否位于允许的目录内。"""
-    target_path = expand_path(target_path)
-    directories = load_directories_config() if directories is None else directories
-
-    for directory in directories:
-        dir_path = expand_path(directory['path'])
-        try:
-            target_path.relative_to(dir_path)
-            return True
-        except ValueError:
-            continue
-
-    return False
-
-def validate_move_paths(source_path, target_directory):
-    """Validate a move operation and return the final destination path."""
-    source_path = expand_path(source_path)
-    target_directory = expand_path(target_directory)
-
-    if not is_path_in_directories(source_path):
-        return None, ('无权限访问源路径', 403)
-
-    if not is_path_in_directories(target_directory):
-        return None, ('无权限移动到目标目录', 403)
-
-    if not source_path.exists():
-        return None, ('源路径不存在', 404)
-
-    if not target_directory.exists():
-        return None, ('目标目录不存在', 404)
-
-    if not target_directory.is_dir():
-        return None, ('目标路径不是目录', 400)
-
-    destination_path = target_directory / source_path.name
-
-    if source_path == destination_path:
-        return None, ('源路径和目标路径相同', 400)
-
-    if destination_path.exists():
-        return None, ('目标目录中已存在同名文件或目录', 409)
-
-    if source_path.is_dir():
-        try:
-            target_directory.relative_to(source_path)
-            return None, ('不能将目录移动到其自身或子目录中', 400)
-        except ValueError:
-            pass
-
-    return destination_path, None
-
-
-def serialize_datetime(value):
-    """Return an ISO timestamp string in UTC."""
-    return value.replace(microsecond=0).isoformat() + 'Z'
-
-def parse_datetime(value):
-    """Parse an ISO timestamp string produced by serialize_datetime."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace('Z', '+00:00')).replace(tzinfo=None)
-    except ValueError:
-        return None
-
-def load_share_links():
-    """Load share-link metadata from local JSON storage."""
-    if not SHARE_LINKS_FILE.exists():
-        return []
-
-    try:
-        with open(SHARE_LINKS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-def save_share_links(links):
-    """Persist share-link metadata to local JSON storage."""
-    with open(SHARE_LINKS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(links, f, ensure_ascii=False, indent=2)
-
-def update_share_links_for_move(source_path, destination_path):
-    """Keep share-link paths in sync after moving a file or directory."""
-    source_path = expand_path(source_path)
-    destination_path = expand_path(destination_path)
-    links = load_share_links()
-    changed = False
-
-    for link in links:
-        link_path_raw = link.get('path', '')
-        if not link_path_raw:
-            continue
-
-        link_path = expand_path(link_path_raw)
-        new_link_path = None
-
-        if link_path == source_path:
-            new_link_path = destination_path
-        elif source_path.is_dir():
-            try:
-                relative = link_path.relative_to(source_path)
-                new_link_path = destination_path / relative
-            except ValueError:
-                continue
-        else:
-            continue
-
-        link['path'] = str(new_link_path)
-        link['display_path'] = simplify_path(new_link_path)
-        link['title'] = new_link_path.name
-        changed = True
-
-    if changed:
-        save_share_links(links)
-
-def public_share_data(link):
-    """Return non-sensitive share-link fields for API responses."""
-    result = deepcopy(link)
-    result.pop('token', None)
-    result['url'] = request.host_url.rstrip('/') + f'/share/{link["token"]}'
-    result['active'] = is_share_link_active(link)
-    return result
-
-def find_share_link(token):
-    """Find a share link by token."""
-    for link in load_share_links():
-        if link.get('token') == token:
-            return link
-    return None
-
-def is_share_link_active(link, enforce_view_limit=True):
-    """Check whether a share link is usable."""
-    if not link or link.get('revoked_at'):
-        return False
-
-    expires_at = parse_datetime(link.get('expires_at'))
-    if expires_at and expires_at < datetime.utcnow():
-        return False
-
-    max_views = link.get('max_views')
-    if enforce_view_limit and max_views is not None and link.get('view_count', 0) >= max_views:
-        return False
-
-    file_path = expand_path(link.get('path', ''))
-    if not is_path_in_directories(file_path):
-        return False
-
-    return file_path.exists() and file_path.is_file()
-
-def increment_share_view(token):
-    """Increment view count for a share link."""
-    links = load_share_links()
-    for link in links:
-        if link.get('token') == token:
-            link['view_count'] = link.get('view_count', 0) + 1
-            link['last_viewed_at'] = serialize_datetime(datetime.utcnow())
-            save_share_links(links)
-            return link
-    return None
 
 def request_has_valid_auth_or_share():
     """Allow remote assets for logged-in users or active share pages."""
@@ -251,371 +84,6 @@ def request_has_valid_auth_or_share():
 
     return decode_token(token) is not None if token else False
 
-def is_public_remote_url(url):
-    """Reject non-http(s), localhost, and private-network targets."""
-    parsed = urlparse(url)
-    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-        return False
-
-    hostname = parsed.hostname.strip().lower()
-    if hostname in {'localhost'} or hostname.endswith('.localhost'):
-        return False
-
-    try:
-        addresses = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return False
-
-    for address in addresses:
-        ip = ipaddress.ip_address(address[4][0])
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            return False
-
-    return True
-
-def preprocess_markdown_content(content):
-    """预处理 Markdown 内容，兼容单换行和行首标签。"""
-    lines = content.split('\n')
-    processed_lines = []
-    in_fenced_code = False
-
-    for line in lines:
-        if line.strip().startswith('```') or line.strip().startswith('~~~'):
-            in_fenced_code = not in_fenced_code
-            processed_lines.append(line)
-            continue
-
-        if in_fenced_code:
-            processed_lines.append(line)
-            continue
-
-        stripped = line.lstrip()
-        tag_match = re.match(r'^(#{1,6})([^#\s].*)$', stripped)
-        if tag_match:
-            hashes = tag_match.group(1)
-            rest = tag_match.group(2)
-            leading_spaces = len(line) - len(stripped)
-            line = ' ' * leading_spaces + '\\' + hashes + rest
-
-        stripped = line.rstrip()
-        if stripped:
-            processed_lines.append(stripped + '  ')
-        else:
-            processed_lines.append('')
-
-    return '\n'.join(processed_lines)
-
-def fix_tag_headings(html_content):
-    """将被 Markdown 误判为标题的 #tag 恢复为普通标签文本。"""
-    def replace_heading(match):
-        content = match.group(2)
-
-        if content.startswith('#'):
-            rest = content[1:]
-            if len(rest) <= 20 and ' ' not in rest:
-                return f'<p><span class="inline-tag">#{content}</span></p>'
-
-        return match.group(0)
-
-    return re.sub(
-        r'<(h[1-6])>([^<]+)</\1>',
-        replace_heading,
-        html_content
-    )
-
-def render_markdown(content):
-    """将 Markdown 内容渲染为 HTML。"""
-    processed_content = preprocess_markdown_content(content)
-    md = markdown.Markdown(extensions=MARKDOWN_EXTENSIONS)
-    html_content = md.convert(processed_content)
-    return fix_tag_headings(html_content)
-
-def rewrite_shared_image_urls(html_content, share_token):
-    """Rewrite relative image URLs so shared pages can load them read-only."""
-    def replace_src(match):
-        prefix = match.group(1)
-        quote_char = match.group(2)
-        src = match.group(3)
-
-        if src.startswith(('http://', 'https://')):
-            shared_src = (
-                f'/api/remote-image?url={quote(src, safe="")}'
-                f'&share_token={quote(share_token, safe="")}'
-            )
-            return f'{prefix}{quote_char}{shared_src}{quote_char}'
-
-        if re.match(r'^//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
-            return match.group(0)
-
-        shared_src = f'/api/image?share_token={quote(share_token, safe="")}&src={quote(src, safe="")}'
-        return f'{prefix}{quote_char}{shared_src}{quote_char}'
-
-    return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
-
-def render_image_file(file_path):
-    """Return a read-only image preview payload."""
-    file_path = Path(file_path)
-    if not file_path.exists():
-        return None, "文件不存在"
-
-    if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
-        return None, "不支持的图片类型"
-
-    try:
-        mtime = file_path.stat().st_mtime
-        modified_time = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
-        image_url = '/api/image?path=' + quote(str(file_path), safe='')
-        escaped_name = html.escape(file_path.name)
-
-        return {
-            'title': file_path.name,
-            'content': (
-                '<div class="image-file-viewer">'
-                f'<img src="{image_url}" alt="{escaped_name}">'
-                '</div>'
-            ),
-            'raw': None,
-            'fileType': 'image',
-            'path': simplify_path(file_path),
-            'size': file_path.stat().st_size,
-            'modified': modified_time
-        }, None
-    except Exception as e:
-        return None, str(e)
-
-# ========================================
-# Authentication Functions
-# ========================================
-
-def get_auth_config():
-    """Get authentication configuration."""
-    return config.get('auth', {})
-
-def is_auth_enabled():
-    """Check if authentication is enabled."""
-    auth_config = get_auth_config()
-    return auth_config.get('enabled', False)
-
-def hash_password(password):
-    """Hash a password using SHA-256."""
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def verify_password(password, hashed):
-    """Verify a password against a hash."""
-    return hash_password(password) == hashed
-
-def get_users():
-    """Get all users from config."""
-    auth_config = get_auth_config()
-    users_list = auth_config.get('users', [])
-    users = {}
-
-    for user in users_list:
-        username = user.get('username')
-        password = user.get('password')
-        is_hashed = user.get('hashed', False)
-
-        if username and password:
-            users[username] = hash_password(password) if not is_hashed else password
-
-    return users
-
-def generate_token(username):
-    """Generate a JWT token for the user."""
-    auth_config = get_auth_config()
-    secret = auth_config.get('jwt_secret', 'default-secret-change-this')
-    expiration_hours = auth_config.get('token_expiration_hours', 24)
-
-    payload = {
-        'username': username,
-        'exp': datetime.utcnow() + timedelta(hours=expiration_hours),
-        'iat': datetime.utcnow()
-    }
-
-    return jwt.encode(payload, secret, algorithm='HS256')
-
-def decode_token(token):
-    """Decode and verify a JWT token."""
-    auth_config = get_auth_config()
-    secret = auth_config.get('jwt_secret', 'default-secret-change-this')
-
-    try:
-        payload = jwt.decode(token, secret, algorithms=['HS256'])
-        return payload
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
-        return None
-
-def login_required(f):
-    """Decorator to require authentication for routes."""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not is_auth_enabled():
-            return f(*args, **kwargs)
-
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Unauthorized'}), 401
-
-        token = auth_header.split(' ')[1]
-        payload = decode_token(token)
-
-        if payload is None:
-            return jsonify({'error': 'Invalid or expired token'}), 401
-
-        request.user = payload
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-# 获取目录层级
-
-def build_directory_node(path, name=None, children=None, is_loaded=False, has_children=False, is_empty=False):
-    path = expand_path(path)
-    return {
-        'name': name or path.name,
-        'path': simplify_path(path),
-        'type': 'directory',
-        'children': children or [],
-        'children_loaded': is_loaded,
-        'has_children': has_children,
-        'is_empty': is_empty
-    }
-
-
-def directory_has_visible_children(path, file_types=None):
-    """检查目录是否包含可见的直接子项。"""
-    if file_types is None:
-        file_types = ['.md']
-
-    path = expand_path(path)
-    if not path.exists() or not path.is_dir():
-        return False
-
-    normalized_file_types = {file_type.lower() for file_type in file_types}
-
-    try:
-        for item in path.iterdir():
-            if item.name.startswith('.'):
-                continue
-            if item.is_dir():
-                return True
-            if item.suffix.lower() in normalized_file_types:
-                return True
-    except (PermissionError, OSError):
-        return False
-
-    return False
-
-
-def get_directory_listing(path, name=None, file_types=None):
-    """获取目录自身及其直接 children。"""
-    if file_types is None:
-        file_types = ['.md']
-
-    path = expand_path(path)
-    if not path.exists() or not path.is_dir():
-        return None
-
-    try:
-        items = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-    except (PermissionError, OSError):
-        items = []
-
-    normalized_file_types = {file_type.lower() for file_type in file_types}
-    children = []
-
-    for item in items:
-        if item.name.startswith('.'):
-            continue
-
-        if item.is_dir():
-            child_has_children = directory_has_visible_children(item, file_types)
-            children.append(build_directory_node(
-                item,
-                name=item.name,
-                children=[],
-                is_loaded=False,
-                has_children=child_has_children,
-                is_empty=not child_has_children
-            ))
-        elif item.suffix.lower() in normalized_file_types:
-            children.append({
-                'name': item.name,
-                'path': simplify_path(item),
-                'type': 'file',
-                'ext': item.suffix.lower()
-            })
-
-    has_children = len(children) > 0
-    return build_directory_node(
-        path,
-        name=name or path.name,
-        children=children,
-        is_loaded=True,
-        has_children=has_children,
-        is_empty=not has_children
-    )
-
-# 读取 Markdown 文件
-def read_markdown_file(file_path):
-    file_path = Path(file_path)
-    if not file_path.exists():
-        return None, "文件不存在"
-
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            raw_content = f.read()
-        html_content = render_markdown(raw_content)
-
-        # 获取文件修改时间
-        mtime = file_path.stat().st_mtime
-        modified_time = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
-
-        return {
-            'title': file_path.stem,
-            'content': html_content,
-            'raw': raw_content,  # 返回原始 Markdown 内容
-            'path': simplify_path(file_path),
-            'size': file_path.stat().st_size,
-            'modified': modified_time
-        }, None
-    except Exception as e:
-        return None, str(e)
-
-# 搜索 Markdown 文件
-def search_files(query, directories):
-    results = []
-    query_lower = query.lower()
-    
-    for directory in directories:
-        path = expand_path(directory['path'])
-        if not path.exists():
-            continue
-        
-        for md_file in path.rglob('*.md'):
-            try:
-                with open(md_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                if query_lower in content.lower() or query_lower in md_file.name.lower():
-                    results.append({
-                        'name': md_file.name,
-                        'path': str(md_file),
-                        'directory': directory['name']
-                    })
-            except:
-                continue
-    
-    return results
 
 # ========================================
 # Authentication Routes
@@ -644,22 +112,30 @@ def api_auth_status():
 def api_auth_login():
     """Handle user login."""
     if not is_auth_enabled():
-        return jsonify({'error': 'Authentication is disabled'}), 400
+        return jsonify({'error': '认证未启用'}), 400
 
-    data = request.get_json()
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
+    if client_ip and ',' in client_ip:
+        client_ip = client_ip.split(',', 1)[0].strip()
+
+    if is_login_rate_limited(client_ip):
+        return jsonify({
+            'error': '登录尝试过于频繁，请稍后再试'
+        }), 429
+
+    data = request.get_json(silent=True) or {}
     username = data.get('username')
     password = data.get('password')
 
     if not username or not password:
-        return jsonify({'error': 'Username and password required'}), 400
+        return jsonify({'error': '请输入用户名和密码'}), 400
 
     users = get_users()
-    if username not in users:
-        return jsonify({'error': 'Invalid credentials'}), 401
+    if username not in users or not verify_password(password, users[username]):
+        record_login_failure(client_ip)
+        return jsonify({'error': '用户名或密码错误'}), 401
 
-    if not verify_password(password, users[username]):
-        return jsonify({'error': 'Invalid credentials'}), 401
-
+    clear_login_failures(client_ip)
     token = generate_token(username)
     return jsonify({
         'token': token,
@@ -1124,50 +600,6 @@ def api_move():
     except Exception as e:
         return jsonify({'error': f'移动失败: {str(e)}'}), 500
 
-# 读取文本文件（txt, json等）
-def read_text_file(file_path, file_ext):
-    """读取文本文件并返回格式化的HTML内容"""
-    file_path = Path(file_path)
-    if not file_path.exists():
-        return None, "文件不存在"
-
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # 对于JSON文件，尝试格式化并添加原始内容
-        raw_json = None
-        if file_ext == '.json':
-            try:
-                import json
-                json_obj = json.loads(content)
-                content = json.dumps(json_obj, ensure_ascii=False, indent=2)
-                raw_json = content  # 保存格式化后的原始JSON
-            except:
-                pass  # 如果不是有效JSON，直接显示原始内容
-
-        # 转义HTML字符并保持格式
-        escaped_content = html.escape(content)
-
-        # 获取文件修改时间
-        mtime = file_path.stat().st_mtime
-        modified_time = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
-
-        result = {
-            'title': file_path.name,
-            'content': f'<pre class="text-file-content">{escaped_content}</pre>',
-            'path': simplify_path(file_path),
-            'size': file_path.stat().st_size,
-            'modified': modified_time
-        }
-
-        # 如果是有效的JSON，添加原始内容
-        if raw_json:
-            result['rawJson'] = raw_json
-
-        return result, None
-    except Exception as e:
-        return None, str(e)
 
 @app.route('/api/search')
 @login_required
@@ -1265,9 +697,7 @@ def api_image():
 
         image_path = expand_path(image_path)
 
-    from flask import send_file, abort
-
-    # 验证路径是否在配置的目录内
+        # 验证路径是否在配置的目录内
     if not is_path_in_directories(image_path):
         abort(403)
 
@@ -1306,7 +736,7 @@ def api_remote_image():
     )
 
     try:
-        opener = build_opener(HTTPRedirectHandler)
+        opener = build_opener(SafeRedirectHandler)
         with opener.open(req, timeout=REMOTE_IMAGE_TIMEOUT_SECONDS) as remote:
             content_type = remote.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
             if not content_type.startswith('image/'):

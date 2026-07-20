@@ -1,6 +1,6 @@
 /**
- * Notion-Style Doc Reader
- * Clean, minimal, functional
+ * Notion-Style Doc Reader — main application
+ * Pure helpers: static/js/utils.js, static/js/theme.js
  */
 
 // State
@@ -19,41 +19,14 @@ let sourceViewMode = 'normal';      // 'normal', 'source', 'split'
 let isEditMode = false;             // Edit mode state
 let shareLinksCache = [];
 let directoryOptionsCache = [];
+let expandedPathsCache = null;      // In-memory cache of expanded directory paths
+let expandedPathsCacheRaw = null;   // Raw localStorage snapshot used to build the cache
 
 // Document search state
 let docSearchMatches = [];          // Array of match elements
 let docSearchIndex = 0;             // Current match index
 let docSearchQuery = '';            // Current search query
 let docSearchHighlightSpans = [];   // Array of highlight spans
-
-function isTouchInteractionMode() {
-    return window.innerWidth <= 768 || window.matchMedia('(hover: none), (pointer: coarse)').matches;
-}
-
-function isImageExtension(ext) {
-    return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(ext);
-}
-
-function isHttpUrl(value) {
-    return value && (value.startsWith('http://') || value.startsWith('https://'));
-}
-
-function remoteImageProxyUrl(url) {
-    const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
-    return `/api/remote-image?url=${encodeURIComponent(url)}${tokenParam}`;
-}
-
-// Helper: Simplify path for display
-function simplifyPath(path) {
-    const homePrefix = '/home/';
-    if (path && path.startsWith(homePrefix)) {
-        const parts = path.split('/');
-        if (parts.length >= 4) {
-            return `~/${parts.slice(3).join('/')}`;
-        }
-    }
-    return path;
-}
 
 // Auth State
 let authToken = null;
@@ -206,6 +179,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initSidebarWidth();
     initTreeFilter();
     initFileFilters();
+    initShortcutHints();
     checkAuthStatus().then(() => {
         loadDirectories();
         // Check URL for file parameter
@@ -246,10 +220,17 @@ function setupEventListeners() {
     // Sidebar toggle
     el.collapseSidebar.addEventListener('click', toggleSidebar);
     el.expandSidebar.addEventListener('click', () => {
-        el.sidebar.classList.remove('collapsed');
-        el.sidebar.classList.add('open');
-        sidebarCollapsed = false;
+        if (window.innerWidth <= 768) {
+            openMobileSidebar();
+        } else {
+            el.sidebar.classList.remove('collapsed');
+            sidebarCollapsed = false;
+        }
     });
+    const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+    if (sidebarBackdrop) {
+        sidebarBackdrop.addEventListener('click', closeMobileSidebar);
+    }
 
     // Sidebar resize
     el.resizeHandle.addEventListener('mousedown', startResize);
@@ -419,200 +400,8 @@ function handleKeyboard(e) {
     }
 }
 
-// ========================================
-// Authentication
-// ========================================
 
-async function checkAuthStatus() {
-    try {
-        // 先从 localStorage 读取 token
-        const savedToken = localStorage.getItem('authToken');
-        if (savedToken) {
-            authToken = savedToken;
-        }
-
-        const response = await authFetch('/api/auth/status');
-        const data = await response.json();
-
-        authEnabled = data.enabled;
-
-        if (data.authenticated) {
-            authUsername = data.username;
-            updateAuthUI(true);
-        } else {
-            authToken = null;
-            authUsername = null;
-            localStorage.removeItem('authToken');
-            updateAuthUI(false);
-
-            if (authEnabled) {
-                openLoginModal();
-            }
-        }
-    } catch (error) {
-        console.error('Failed to check auth status:', error);
-        authEnabled = false;
-        updateAuthUI(false);
-    }
-}
-
-function updateAuthUI(authenticated) {
-    if (authenticated) {
-        el.authBtn.classList.add('authenticated');
-        el.authBtn.querySelector('.auth-username').textContent = authUsername;
-    } else {
-        el.authBtn.classList.remove('authenticated');
-    }
-}
-
-function handleAuthClick() {
-    if (authToken) {
-        openLogoutConfirm();
-    } else {
-        openLoginModal();
-    }
-}
-
-function openLogoutConfirm() {
-    el.logoutConfirmModal.classList.add('visible');
-}
-
-function closeLogoutConfirm() {
-    el.logoutConfirmModal.classList.remove('visible');
-}
-
-function confirmLogout() {
-    closeLogoutConfirm();
-    logout();
-}
-
-function openLoginModal() {
-    el.loginModal.classList.add('visible');
-    el.loginUsername.focus();
-
-    // Hide close button and disable backdrop click when auth is enabled
-    if (authEnabled) {
-        el.loginModal.classList.add('auth-required');
-    } else {
-        el.loginModal.classList.remove('auth-required');
-    }
-}
-
-function closeLoginModal() {
-    // Don't allow closing if auth is enabled and not authenticated
-    if (authEnabled && !authToken) {
-        return;
-    }
-
-    el.loginModal.classList.remove('visible');
-    el.loginForm.reset();
-    el.loginError.style.display = 'none';
-}
-
-async function handleLogin(e) {
-    e.preventDefault();
-
-    const username = el.loginUsername.value;
-    const password = el.loginPassword.value;
-
-    // Show loading state
-    el.loginBtn.disabled = true;
-    el.loginBtn.querySelector('.login-text').style.display = 'none';
-    el.loginBtn.querySelector('.login-loading').style.display = 'flex';
-    el.loginError.style.display = 'none';
-
-    try {
-        const response = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ username, password })
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-            authToken = data.token;
-            authUsername = data.username;
-            localStorage.setItem('authToken', authToken);
-
-            updateAuthUI(true);
-            closeLoginModal();
-
-            // Reload directories after successful login
-            loadDirectories();
-            showToast(`Welcome, ${authUsername}`);
-        } else {
-            el.loginError.textContent = data.error || 'Login failed';
-            el.loginError.style.display = 'block';
-        }
-    } catch (error) {
-        console.error('Login failed:', error);
-        el.loginError.textContent = 'Login failed. Please try again.';
-        el.loginError.style.display = 'block';
-    } finally {
-        el.loginBtn.disabled = false;
-        el.loginBtn.querySelector('.login-text').style.display = 'flex';
-        el.loginBtn.querySelector('.login-loading').style.display = 'none';
-    }
-}
-
-async function logout() {
-    try {
-        await fetch('/api/auth/logout', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
-    } catch (error) {
-        console.error('Logout failed:', error);
-    }
-
-    authToken = null;
-    authUsername = null;
-    localStorage.removeItem('authToken');
-
-    updateAuthUI(false);
-    showToast('Logged out');
-
-    // Show login modal if auth is enabled
-    if (authEnabled) {
-        openLoginModal();
-    }
-
-    // Clear document view
-    el.welcome.style.display = 'flex';
-    el.document.style.display = 'none';
-    el.treeItems.innerHTML = '';
-
-    // Clear URL file parameter
-    const newUrl = new URL(window.location);
-    newUrl.searchParams.delete('file');
-    window.history.replaceState({}, '', newUrl);
-}
-
-async function authFetch(url, options = {}) {
-    // 如果有 token，就带上（除了登录接口）
-    if (authToken && url !== '/api/auth/login') {
-        options.headers = options.headers || {};
-        options.headers['Authorization'] = `Bearer ${authToken}`;
-    }
-
-    const response = await fetch(url, options);
-
-    // Handle 401 - Unauthorized
-    if (response.status === 401 && authEnabled) {
-        authToken = null;
-        authUsername = null;
-        localStorage.removeItem('authToken');
-        updateAuthUI(false);
-        openLoginModal();
-    }
-
-    return response;
-}
+// Authentication: static/js/auth.js
 
 // ========================================
 // Directory Tree
@@ -683,14 +472,14 @@ function ensureDefaultExpandedRoots() {
             expandedPaths.add(node.path);
         }
     });
-    localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+    persistExpandedPaths(expandedPaths);
 }
 
 async function fetchDirectoryChildren(path) {
     const response = await authFetch(buildDirectoryRequestUrl(path));
     const data = await response.json();
     if (!response.ok) {
-        throw new Error(data.error || 'Failed to load directory');
+        throw new Error(data.error || '加载目录失败');
     }
     return Array.isArray(data) ? data : [];
 }
@@ -717,27 +506,123 @@ async function restoreExpandedDirectories() {
     const expandedPaths = Array.from(getExpandedPaths())
         .sort((a, b) => a.split('/').length - b.split('/').length);
 
+    // Group by depth so parents finish loading before children are resolved.
+    // Same-depth nodes can still load concurrently.
+    const byDepth = new Map();
     for (const path of expandedPaths) {
-        const node = findNodeByPath(path);
-        if (!node || node.type !== 'directory' || node.children_loaded || !node.has_children) {
-            continue;
-        }
-        try {
-            await ensureDirectoryLoaded(path);
-        } catch (error) {
-            console.error(`Failed to restore directory ${path}:`, error);
+        const depth = path.split('/').length;
+        if (!byDepth.has(depth)) byDepth.set(depth, []);
+        byDepth.get(depth).push(path);
+    }
+
+    const concurrency = 6;
+    const depths = Array.from(byDepth.keys()).sort((a, b) => a - b);
+    for (const depth of depths) {
+        const pathsAtDepth = byDepth.get(depth);
+        for (let index = 0; index < pathsAtDepth.length; index += concurrency) {
+            const batch = pathsAtDepth.slice(index, index + concurrency);
+            await Promise.all(batch.map(async (path) => {
+                const node = findNodeByPath(path);
+                if (!node || node.type !== 'directory' || node.children_loaded || !node.has_children) {
+                    return;
+                }
+                try {
+                    await ensureDirectoryLoaded(path);
+                } catch (error) {
+                    console.error(`Failed to restore directory ${path}:`, error);
+                }
+            }));
         }
     }
 }
 
+function findTreeItemElement(path) {
+    if (!el.treeItems) return null;
+    const row = el.treeItems.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
+    return row ? row.closest('.tree-item') : null;
+}
+
+function getOrCreateTreeChildrenContainer(item) {
+    let children = item.querySelector(':scope > .tree-children');
+    if (!children) {
+        children = document.createElement('div');
+        children.className = 'tree-children';
+        item.appendChild(children);
+    }
+    return children;
+}
+
+function mountDirectoryChildren(item, node, level) {
+    const children = getOrCreateTreeChildrenContainer(item);
+    children.innerHTML = '';
+
+    const fragment = document.createDocumentFragment();
+    getVisibleTreeNodes(node.children || []).forEach(child => {
+        fragment.appendChild(renderTree(child, level + 1));
+    });
+    children.appendChild(fragment);
+    return children;
+}
+
+function collapseDirectoryItem(item, nodePath, expandedPaths = getExpandedPaths()) {
+    if (!item) return;
+
+    item.classList.remove('expanded');
+    const children = item.querySelector(':scope > .tree-children');
+    if (children) {
+        children.innerHTML = '';
+    }
+
+    // Drop nested expanded paths so restore/render stay proportional to visible state.
+    let changed = expandedPaths.delete(nodePath);
+    for (const path of Array.from(expandedPaths)) {
+        if (path.startsWith(nodePath + '/')) {
+            expandedPaths.delete(path);
+            changed = true;
+        }
+    }
+    if (changed) {
+        persistExpandedPaths(expandedPaths);
+    }
+}
+
+function expandDirectoryItem(item, node, level, expandedPaths = getExpandedPaths()) {
+    if (!item || !node) return;
+
+    mountDirectoryChildren(item, node, level);
+    item.classList.add('expanded');
+    item.classList.toggle(
+        'no-children',
+        !(node.has_children || getVisibleTreeNodes(node.children || []).length > 0)
+    );
+
+    if (!expandedPaths.has(node.path)) {
+        expandedPaths.add(node.path);
+        persistExpandedPaths(expandedPaths);
+    }
+}
+
+function getTreeNodeLevel(item) {
+    let level = 0;
+    let parent = item?.parentElement;
+    while (parent && parent !== el.treeItems) {
+        if (parent.classList?.contains('tree-children')) {
+            level += 1;
+        }
+        parent = parent.parentElement;
+    }
+    return level;
+}
+
 function renderDirectoryTree() {
     const visibleDirectories = getVisibleTreeNodes(directoryTreeData);
+    const expandedPaths = getExpandedPaths();
     el.treeItems.innerHTML = '';
 
     if (visibleDirectories.length === 0) {
         el.treeItems.innerHTML = `
             <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 13px;">
-                No pages found
+                暂无页面
             </div>
         `;
         updateDirectoryOptionsCache();
@@ -745,9 +630,11 @@ function renderDirectoryTree() {
         return;
     }
 
+    const fragment = document.createDocumentFragment();
     visibleDirectories.forEach(dir => {
-        el.treeItems.appendChild(renderTree(dir, 0));
+        fragment.appendChild(renderTree(dir, 0, expandedPaths));
     });
+    el.treeItems.appendChild(fragment);
 
     updateDirectoryOptionsCache();
     updateExpandAllButton();
@@ -762,7 +649,7 @@ async function loadDirectories() {
         const response = await authFetch(buildDirectoryRequestUrl());
         const directories = await response.json();
         if (!response.ok) {
-            throw new Error(directories.error || 'Failed to load directories');
+            throw new Error(directories.error || '加载目录列表失败');
         }
 
         directoryTreeData = Array.isArray(directories) ? directories : [];
@@ -773,7 +660,7 @@ async function loadDirectories() {
         console.error('Failed to load directories:', error);
         el.treeItems.innerHTML = `
             <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 13px;">
-                Failed to load pages
+                加载页面失败
             </div>
         `;
         directoryTreeData = [];
@@ -794,104 +681,250 @@ async function toggleDirectoryNode(node) {
 
     const expandedPaths = getExpandedPaths();
     const isExpanded = expandedPaths.has(node.path);
+    const item = findTreeItemElement(node.path);
 
     if (isExpanded) {
-        expandedPaths.delete(node.path);
-        localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
-        renderDirectoryTree();
+        if (item) {
+            collapseDirectoryItem(item, node.path, expandedPaths);
+        } else {
+            expandedPaths.delete(node.path);
+            persistExpandedPaths(expandedPaths);
+            renderDirectoryTree();
+        }
+        updateExpandAllButton();
         return;
     }
 
     if (!node.children_loaded) {
+        if (item) {
+            item.classList.add('loading');
+        }
         try {
             await ensureDirectoryLoaded(node.path);
         } catch (error) {
             console.error(`Failed to expand directory ${node.path}:`, error);
-            showToast(error.message || 'Failed to load directory');
+            showToast(error.message || '加载目录失败');
             return;
+        } finally {
+            if (item) {
+                item.classList.remove('loading');
+            }
         }
     }
 
-    expandedPaths.add(node.path);
-    localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
-    renderDirectoryTree();
+    if (item) {
+        expandDirectoryItem(item, node, getTreeNodeLevel(item), expandedPaths);
+    } else {
+        expandedPaths.add(node.path);
+        persistExpandedPaths(expandedPaths);
+        renderDirectoryTree();
+    }
+    updateExpandAllButton();
 }
 
-function renderTree(node, level) {
+// Pre-parsed SVG templates — clone instead of re-parsing innerHTML per row.
+const TREE_SVG_HTML = {
+    toggle: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>',
+    folder: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+    md: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6"/><path d="M9 15l3 3 3-3"/></svg>',
+    txt: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h8"/><path d="M8 17h6"/></svg>',
+    json: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M10 12h1"/><path d="M14 12h1"/><path d="M10 16h1"/><path d="M14 16h1"/></svg>',
+    image: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
+    copy: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    move: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M13 5l7 7-7 7"/></svg>',
+    add: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    trash: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+    fileOpt: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+    dirOpt: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>',
+};
+
+const treeSvgCache = new Map();
+
+function cloneTreeSvg(name) {
+    let cached = treeSvgCache.get(name);
+    if (!cached) {
+        const template = document.createElement('template');
+        template.innerHTML = TREE_SVG_HTML[name];
+        cached = template.content.firstElementChild;
+        treeSvgCache.set(name, cached);
+    }
+    return cached.cloneNode(true);
+}
+
+function treeFileIconName(fileName) {
+    const ext = fileName.split('.').pop().toLowerCase();
+    if (ext === 'md') return 'md';
+    if (ext === 'txt') return 'txt';
+    if (ext === 'json') return 'json';
+    if (isImageExtension(ext)) return 'image';
+    return 'md';
+}
+
+function showTreeActionButtons(row) {
+    const actionButtons = ensureTreeActionButtons(row);
+    if (actionButtons) {
+        actionButtons.style.display = 'flex';
+    }
+}
+
+function hideTreeActionButtons(row) {
+    const actionButtons = row.querySelector(':scope > .tree-action-buttons');
+    if (actionButtons) {
+        actionButtons.style.display = 'none';
+    }
+}
+
+/**
+ * Build hover/touch action controls on demand.
+ * Large directories stay cheap until the user actually interacts with a row.
+ */
+function ensureTreeActionButtons(row) {
+    if (!row) return null;
+    let actionButtons = row.querySelector(':scope > .tree-action-buttons');
+    if (actionButtons) {
+        return actionButtons;
+    }
+
+    const path = row.dataset.path;
+    const nodeType = row.dataset.type;
+    const nodeName = row.dataset.name || '';
+    if (!path || !nodeType) {
+        return null;
+    }
+
+    actionButtons = document.createElement('div');
+    actionButtons.className = 'tree-action-buttons';
+    actionButtons.style.cssText = 'display: none; align-items: center; gap: 2px; margin-left: auto;';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'tree-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.title = '复制路径';
+    copyBtn.appendChild(cloneTreeSvg('copy'));
+    copyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        copyTreePath(path);
+    });
+    actionButtons.appendChild(copyBtn);
+
+    const moveBtn = document.createElement('button');
+    moveBtn.className = 'tree-move-btn';
+    moveBtn.type = 'button';
+    moveBtn.title = nodeType === 'directory' ? '移动目录' : '移动文件';
+    moveBtn.appendChild(cloneTreeSvg('move'));
+    moveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        openMoveItemModal(path, nodeName, nodeType);
+    });
+    actionButtons.appendChild(moveBtn);
+
+    if (nodeType === 'directory') {
+        const addBtn = document.createElement('button');
+        addBtn.className = 'tree-add-btn';
+        addBtn.type = 'button';
+        addBtn.title = '新建文件或目录';
+        addBtn.appendChild(cloneTreeSvg('add'));
+
+        const dropdown = document.createElement('div');
+        dropdown.className = 'tree-dropdown';
+        dropdown.hidden = true;
+
+        const newFileOption = document.createElement('div');
+        newFileOption.className = 'tree-dropdown-item';
+        newFileOption.appendChild(cloneTreeSvg('fileOpt'));
+        const newFileLabel = document.createElement('span');
+        newFileLabel.textContent = '新建文件';
+        newFileOption.appendChild(newFileLabel);
+        newFileOption.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            hideAllDropdowns();
+            openCreateFileModal(path);
+        });
+
+        const newDirOption = document.createElement('div');
+        newDirOption.className = 'tree-dropdown-item';
+        newDirOption.appendChild(cloneTreeSvg('dirOpt'));
+        const newDirLabel = document.createElement('span');
+        newDirLabel.textContent = '新建目录';
+        newDirOption.appendChild(newDirLabel);
+        newDirOption.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            hideAllDropdowns();
+            openCreateDirModal(path);
+        });
+
+        dropdown.appendChild(newFileOption);
+        dropdown.appendChild(newDirOption);
+
+        const addBtnContainer = document.createElement('div');
+        addBtnContainer.className = 'tree-add-btn-wrap';
+        addBtnContainer.appendChild(addBtn);
+        addBtnContainer.appendChild(dropdown);
+
+        addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const isVisible = !dropdown.hidden && dropdown.style.display !== 'none';
+            hideAllDropdowns();
+            if (!isVisible) {
+                dropdown.hidden = false;
+                dropdown.style.display = 'block';
+            }
+        });
+
+        actionButtons.insertBefore(addBtnContainer, actionButtons.firstChild);
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'tree-delete-btn';
+        deleteBtn.type = 'button';
+        deleteBtn.title = '删除目录';
+        deleteBtn.appendChild(cloneTreeSvg('trash'));
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            openDeleteDirConfirm(path, nodeName);
+        });
+        actionButtons.appendChild(deleteBtn);
+    }
+
+    row.appendChild(actionButtons);
+    return actionButtons;
+}
+
+function renderTree(node, level, expandedPaths = getExpandedPaths()) {
     const item = document.createElement('div');
     item.className = 'tree-item';
-    const isTouchMode = isTouchInteractionMode();
 
     const isDirectory = node.type === 'directory';
-    const hasRenderedChildren = isDirectory && Array.isArray(node.children) && getVisibleTreeNodes(node.children).length > 0;
+    const isExpanded = isDirectory && expandedPaths.has(node.path);
+    const hasRenderedChildren = isDirectory
+        && Array.isArray(node.children)
+        && getVisibleTreeNodes(node.children).length > 0;
     const canExpand = isDirectory && (node.has_children || hasRenderedChildren);
-    if (!canExpand) {
+    if (isDirectory && !canExpand) {
         item.classList.add('no-children');
     }
 
     const row = document.createElement('div');
     row.className = 'tree-row';
     row.dataset.path = node.path;
+    row.dataset.type = node.type;
+    row.dataset.name = node.name;
 
     const toggle = document.createElement('div');
     toggle.className = 'tree-toggle';
-    toggle.innerHTML = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="9 18 15 12 9 6"/>
-        </svg>
-    `;
+    if (isDirectory) {
+        toggle.appendChild(cloneTreeSvg('toggle'));
+    }
     row.appendChild(toggle);
 
     const icon = document.createElement('div');
     icon.className = 'tree-icon';
-
-    if (isDirectory) {
-        icon.innerHTML = `
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-        `;
-    } else {
-        const ext = node.name.split('.').pop().toLowerCase();
-        if (ext === 'md') {
-            icon.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <path d="M12 18v-6"/>
-                    <path d="M9 15l3 3 3-3"/>
-                </svg>
-            `;
-        } else if (ext === 'txt') {
-            icon.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <path d="M8 13h8"/>
-                    <path d="M8 17h6"/>
-                </svg>
-            `;
-        } else if (ext === 'json') {
-            icon.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <path d="M10 12h1"/>
-                    <path d="M14 12h1"/>
-                    <path d="M10 16h1"/>
-                    <path d="M14 16h1"/>
-                </svg>
-            `;
-        } else if (isImageExtension(ext)) {
-            icon.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <rect x="3" y="3" width="18" height="18" rx="2"/>
-                    <circle cx="8.5" cy="8.5" r="1.5"/>
-                    <path d="M21 15l-5-5L5 21"/>
-                </svg>
-            `;
-        }
-    }
+    icon.appendChild(cloneTreeSvg(isDirectory ? 'folder' : treeFileIconName(node.name)));
     row.appendChild(icon);
 
     const label = document.createElement('span');
@@ -899,196 +932,23 @@ function renderTree(node, level) {
     label.textContent = node.name;
     row.appendChild(label);
 
-    const actionButtons = document.createElement('div');
-    actionButtons.className = 'tree-action-buttons';
-    actionButtons.style.cssText = 'display: none; align-items: center; gap: 2px; margin-left: auto;';
-
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'tree-copy-btn';
-    copyBtn.title = 'Copy path';
-    copyBtn.innerHTML = `
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="9" y="9" width="13" height="13" rx="2"/>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-    `;
-    copyBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        copyTreePath(node.path);
-    });
-    actionButtons.appendChild(copyBtn);
-
-    const moveBtn = document.createElement('button');
-    moveBtn.className = 'tree-move-btn';
-    moveBtn.title = node.type === 'directory' ? 'Move directory' : 'Move file';
-    moveBtn.innerHTML = `
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M5 12h14"/>
-            <path d="M13 5l7 7-7 7"/>
-        </svg>
-    `;
-    moveBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        openMoveItemModal(node.path, node.name, node.type);
-    });
-    actionButtons.appendChild(moveBtn);
-
-    if (isDirectory) {
-        const addBtn = document.createElement('button');
-        addBtn.className = 'tree-add-btn';
-        addBtn.title = 'Add file or directory';
-        addBtn.innerHTML = `
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19"/>
-                <line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-        `;
-
-        const dropdown = document.createElement('div');
-        dropdown.className = 'tree-dropdown';
-        dropdown.style.cssText = `
-            display: none;
-            position: absolute;
-            right: 0;
-            top: 100%;
-            background: var(--bg-primary);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            z-index: 100;
-            min-width: 120px;
-            padding: 4px 0;
-        `;
-
-        const newFileOption = document.createElement('div');
-        newFileOption.className = 'tree-dropdown-item';
-        newFileOption.style.cssText = `
-            padding: 6px 12px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 13px;
-            color: var(--text-primary);
-        `;
-        newFileOption.innerHTML = `
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14 2 14 8 20 8"/>
-            </svg>
-            <span>新建文件</span>
-        `;
-        newFileOption.addEventListener('mouseenter', () => {
-            newFileOption.style.background = 'var(--bg-hover)';
-        });
-        newFileOption.addEventListener('mouseleave', () => {
-            newFileOption.style.background = 'transparent';
-        });
-        newFileOption.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            hideAllDropdowns();
-            openCreateFileModal(node.path);
-        });
-
-        const newDirOption = document.createElement('div');
-        newDirOption.className = 'tree-dropdown-item';
-        newDirOption.style.cssText = `
-            padding: 6px 12px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 13px;
-            color: var(--text-primary);
-        `;
-        newDirOption.innerHTML = `
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                <line x1="12" y1="11" x2="12" y2="17"/>
-                <line x1="9" y1="14" x2="15" y2="14"/>
-            </svg>
-            <span>新建目录</span>
-        `;
-        newDirOption.addEventListener('mouseenter', () => {
-            newDirOption.style.background = 'var(--bg-hover)';
-        });
-        newDirOption.addEventListener('mouseleave', () => {
-            newDirOption.style.background = 'transparent';
-        });
-        newDirOption.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            hideAllDropdowns();
-            openCreateDirModal(node.path);
-        });
-
-        dropdown.appendChild(newFileOption);
-        dropdown.appendChild(newDirOption);
-
-        const addBtnContainer = document.createElement('div');
-        addBtnContainer.style.cssText = 'position: relative;';
-        addBtnContainer.appendChild(addBtn);
-        addBtnContainer.appendChild(dropdown);
-
-        addBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            const isVisible = dropdown.style.display === 'block';
-            hideAllDropdowns();
-            if (!isVisible) {
-                dropdown.style.display = 'block';
-            }
-        });
-
-        actionButtons.insertBefore(addBtnContainer, actionButtons.firstChild);
-    }
-
-    if (isDirectory) {
-        const deleteBtn = document.createElement('button');
-        deleteBtn.className = 'tree-delete-btn';
-        deleteBtn.title = 'Delete directory';
-        deleteBtn.innerHTML = `
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-            </svg>
-        `;
-        deleteBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            openDeleteDirConfirm(node.path, node.name);
-        });
-        actionButtons.appendChild(deleteBtn);
-    }
-
-    row.appendChild(actionButtons);
-
-    if (!isTouchMode) {
-        row.addEventListener('mouseenter', () => {
-            actionButtons.style.display = 'flex';
-        });
-        row.addEventListener('mouseleave', () => {
-            actionButtons.style.display = 'none';
-        });
+    // Action buttons are created on first hover / touch activation.
+    if (!isTouchInteractionMode()) {
+        row.addEventListener('mouseenter', () => showTreeActionButtons(row));
+        row.addEventListener('mouseleave', () => hideTreeActionButtons(row));
     }
 
     item.appendChild(row);
 
     if (isDirectory) {
-        const children = document.createElement('div');
-        children.className = 'tree-children';
-
-        getVisibleTreeNodes(node.children || []).forEach(child => {
-            children.appendChild(renderTree(child, level + 1));
-        });
-
-        item.appendChild(children);
-
-        if (getExpandedPaths().has(node.path)) {
+        // Only mount children for expanded directories so collapsed branches stay cheap.
+        if (isExpanded) {
+            mountDirectoryChildren(item, node, level);
             item.classList.add('expanded');
+        } else {
+            const children = document.createElement('div');
+            children.className = 'tree-children';
+            item.appendChild(children);
         }
 
         const handleToggle = async (e) => {
@@ -1103,9 +963,7 @@ function renderTree(node, level) {
 
         toggle.addEventListener('click', handleToggle);
         row.addEventListener('click', handleToggle);
-    }
-
-    if (node.type === 'file') {
+    } else {
         row.addEventListener('click', () => {
             loadFile(node.path, node.name);
             setActiveRow(row);
@@ -1129,11 +987,7 @@ function setActiveRow(row) {
         document.querySelectorAll('.tree-action-buttons').forEach(buttons => {
             buttons.style.display = 'none';
         });
-
-        const actionButtons = row.querySelector('.tree-action-buttons');
-        if (actionButtons && actionButtons.children.length > 0) {
-            actionButtons.style.display = 'flex';
-        }
+        showTreeActionButtons(row);
     }
 }
 
@@ -1145,12 +999,17 @@ async function loadFile(filePath, fileName) {
     try {
         currentPath = filePath;
 
+        // On mobile, close the drawer after picking a page so content is readable.
+        if (window.innerWidth <= 768) {
+            closeMobileSidebar();
+        }
+
         const response = await authFetch(`/api/file?path=${encodeURIComponent(filePath)}`);
         const data = await response.json();
 
         if (data.error) {
             showError(data.error);
-            return;
+            return false;
         }
 
         const isImageFile = data.fileType === 'image';
@@ -1405,7 +1264,7 @@ async function loadFile(filePath, fileName) {
                         const count = document.createElement('span');
                         count.className = 'json-count';
                         const len = type === 'array' ? value.length : Object.keys(value).length;
-                        count.textContent = isEmpty ? '' : ` ${len} ${type === 'array' ? 'items' : 'keys'} `;
+                        count.textContent = isEmpty ? '' : ` ${len} ${type === 'array' ? '项' : '个键'} `;
                         line.appendChild(count);
 
                         wrapper.appendChild(line);
@@ -1479,7 +1338,7 @@ async function loadFile(filePath, fileName) {
                 toolbar.innerHTML = `
                     <button class="json-btn" id="jsonExpandAll">Expand All</button>
                     <button class="json-btn" id="jsonCollapseAll">Collapse All</button>
-                    <button class="json-btn" id="jsonCopy">Copy JSON</button>
+                    <button class="json-btn" id="jsonCopy">复制 JSON</button>
                 `;
 
                 const viewerWrapper = document.createElement('div');
@@ -1517,9 +1376,9 @@ async function loadFile(filePath, fileName) {
 
                 toolbar.querySelector('#jsonCopy').addEventListener('click', () => {
                     navigator.clipboard.writeText(JSON.stringify(jsonData, null, 2)).then(() => {
-                        showToast('JSON copied');
+                        showToast('JSON 已复制');
                     }).catch(() => {
-                        showToast('Copy failed');
+                        showToast('复制失败');
                     });
                 });
         };
@@ -1576,12 +1435,14 @@ async function loadFile(filePath, fileName) {
         newUrl.searchParams.set('file', filePath);
         window.history.replaceState({}, '', newUrl);
 
-        // Scroll to top
+        // Scroll to top (callers that need in-doc jump will scroll to the hit after this)
         window.scrollTo(0, 0);
 
+        return true;
     } catch (error) {
         console.error('Failed to load file:', error);
-        showError('Failed to load document');
+        showError('加载文档失败');
+        return false;
     }
 }
 
@@ -1591,7 +1452,7 @@ function showError(message) {
     el.document.classList.remove('image-mode');
     el.topbar.classList.remove('image-mode');
 
-    el.docTitle.textContent = 'Error';
+    el.docTitle.textContent = '出错了';
     el.docPath.textContent = '';
     el.docContent.innerHTML = `
         <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
@@ -1731,62 +1592,153 @@ function handleSearchInput(e) {
 function showSearchPlaceholder() {
     el.searchResults.innerHTML = `
         <div class="search-placeholder">
-            Type to search across all pages...
+            输入关键词，搜索全部页面...
         </div>
     `;
 }
 
 async function performSearch(query) {
+    el.searchResults.innerHTML = `
+        <div class="search-placeholder">搜索中…</div>
+    `;
+
     try {
         const response = await authFetch(`/api/search?q=${encodeURIComponent(query)}`);
-        const results = await response.json();
+        let results = null;
+        try {
+            results = await response.json();
+        } catch (_) {
+            results = null;
+        }
 
-        displaySearchResults(results);
+        if (response.status === 401) {
+            el.searchResults.innerHTML = `
+                <div class="search-placeholder">请先登录后再搜索</div>
+            `;
+            return;
+        }
+
+        if (!response.ok) {
+            const msg = (results && results.error) ? results.error : `搜索失败 (${response.status})`;
+            el.searchResults.innerHTML = `
+                <div class="search-placeholder">${escapeHtml(String(msg))}</div>
+            `;
+            return;
+        }
+
+        if (!Array.isArray(results)) {
+            el.searchResults.innerHTML = `
+                <div class="search-placeholder">搜索返回格式异常</div>
+            `;
+            return;
+        }
+
+        displaySearchResults(results, query);
     } catch (error) {
         console.error('Search failed:', error);
         el.searchResults.innerHTML = `
             <div class="search-placeholder">
-                Search failed
+                搜索失败，请检查网络后重试
             </div>
         `;
     }
 }
 
-function displaySearchResults(results) {
-    if (results.length === 0) {
+function displaySearchResults(results, query = '') {
+    if (!Array.isArray(results) || results.length === 0) {
         el.searchResults.innerHTML = `
             <div class="search-placeholder">
-                No results found
+                未找到结果
             </div>
         `;
         return;
     }
 
-    el.searchResults.innerHTML = results.map(result => `
-        <div class="search-result" data-path="${result.path}">
+    el.searchResults.innerHTML = results.map((result) => {
+        const path = result.path || '';
+        const name = result.name || path.split('/').pop() || '未命名';
+        const dirLabel = result.directory || '';
+        const snippet = result.snippet || '';
+        const matchKind = result.match === 'name' ? 'name' : 'content';
+        const matchLabel = matchKind === 'name' ? '文件名' : '正文';
+        return `
+        <div class="search-result" role="option" data-path="${escapeHtml(path)}" data-query="${escapeHtml(query)}" data-match="${matchKind}" tabindex="0">
             <div class="search-result-icon">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
                     <polyline points="14 2 14 8 20 8"/>
-                    <path d="M12 18v-6"/>
-                    <path d="M9 15l3 3 3-3"/>
                 </svg>
             </div>
             <div class="search-result-info">
-                <div class="search-result-title">${escapeHtml(result.name)}</div>
-                <div class="search-result-path">${result.directory}</div>
+                <div class="search-result-title">${escapeHtml(name)}</div>
+                <div class="search-result-path">${escapeHtml(dirLabel)} · ${matchLabel}</div>
+                ${snippet ? `<div class="search-result-snippet">${escapeHtml(snippet)}</div>` : ''}
             </div>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('');
 
-    // Add click handlers
+    const openResult = async (item) => {
+        const path = item.getAttribute('data-path');
+        const q = item.getAttribute('data-query') || '';
+        const matchKind = item.getAttribute('data-match') || 'content';
+        if (!path) return;
+        closeSearch();
+        const ok = await loadFile(path);
+        if (!ok || !q) return;
+        await jumpToSearchHitInDocument(q, matchKind);
+    };
+
     el.searchResults.querySelectorAll('.search-result').forEach(item => {
-        item.addEventListener('click', () => {
-            const path = item.dataset.path;
-            loadFile(path);
-            closeSearch();
+        item.addEventListener('click', () => openResult(item));
+        item.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                openResult(item);
+            }
         });
     });
+}
+
+/**
+ * After opening a file from 跨库搜索: locate first hit in the 阅读视图.
+ * matchKind: 'name' | 'content' (from API). Filename-only → toast, no fake highlight.
+ */
+async function jumpToSearchHitInDocument(query, matchKind) {
+    if (!query) return;
+
+    // Wait two frames so layout/paint catch up after innerHTML + hljs.
+    await new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+
+    if (matchKind === 'name') {
+        showToast('已打开（文件名匹配）');
+        return;
+    }
+
+    if (!el.docSearchBar || !el.docSearchInput) {
+        showToast('已打开，正文中未定位到关键词');
+        return;
+    }
+
+    openDocSearch();
+    el.docSearchInput.value = query;
+    docSearchQuery = query;
+    const count = performDocSearch(query);
+
+    if (!count) {
+        closeDocSearch();
+        showToast('已打开，正文中未定位到关键词');
+    }
+}
+
+/** Open the in-document find bar and run a query (manual / programmatic). */
+function openDocSearchWithQuery(query) {
+    if (!el.docSearchBar || !el.docSearchInput || !query) return;
+    openDocSearch();
+    el.docSearchInput.value = query;
+    docSearchQuery = query;
+    return performDocSearch(query);
 }
 
 // ========================================
@@ -1850,19 +1802,19 @@ function refreshCurrentFile() {
             setTimeout(() => {
                 el.refreshBtn.classList.remove('spinning');
             }, 300);
-            showToast('Refreshed');
+            showToast('已刷新');
         });
     } else {
         setTimeout(() => {
             el.refreshBtn.classList.remove('spinning');
         }, 300);
-        showToast('Refreshed');
+        showToast('已刷新');
     }
 }
 
 function toggleSourceView() {
     if (!currentRawContent) {
-        showToast('No source content available');
+        showToast('没有可显示的源码');
         return;
     }
 
@@ -1943,43 +1895,44 @@ function stopResize() {
     }
 }
 
+function setMobileSidebarOpen(isOpen) {
+    const backdrop = document.getElementById('sidebarBackdrop');
+    if (isOpen) {
+        el.sidebar.classList.add('open');
+        if (backdrop) {
+            backdrop.hidden = false;
+            backdrop.classList.add('visible');
+        }
+        sidebarCollapsed = false;
+    } else {
+        el.sidebar.classList.remove('open');
+        if (backdrop) {
+            backdrop.classList.remove('visible');
+            backdrop.hidden = true;
+        }
+        sidebarCollapsed = true;
+    }
+}
+
+function openMobileSidebar() {
+    setMobileSidebarOpen(true);
+}
+
+function closeMobileSidebar() {
+    setMobileSidebarOpen(false);
+}
+
 function toggleSidebar() {
-    sidebarCollapsed = !sidebarCollapsed;
-
     if (window.innerWidth <= 768) {
-        el.sidebar.classList.toggle('open');
-    } else {
-        el.sidebar.classList.toggle('collapsed');
-    }
-}
-
-// ========================================
-// Theme
-// ========================================
-
-function initTheme() {
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme) {
-        document.documentElement.setAttribute('data-theme', savedTheme);
-    }
-}
-
-function toggleTheme() {
-    const current = document.documentElement.getAttribute('data-theme');
-    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-
-    let newTheme;
-    if (current === 'dark') {
-        newTheme = 'light';
-    } else if (current === 'light') {
-        newTheme = 'dark';
-    } else {
-        newTheme = systemDark ? 'light' : 'dark';
+        setMobileSidebarOpen(!el.sidebar.classList.contains('open'));
+        return;
     }
 
-    document.documentElement.setAttribute('data-theme', newTheme);
-    localStorage.setItem('theme', newTheme);
+    sidebarCollapsed = !sidebarCollapsed;
+    el.sidebar.classList.toggle('collapsed', sidebarCollapsed);
 }
+
+// Theme helpers: static/js/theme.js (initTheme, toggleTheme, initShortcutHints)
 
 // ========================================
 // Copy Path
@@ -1987,7 +1940,7 @@ function toggleTheme() {
 
 function copyPath() {
     if (!currentPath) return;
-    copyText(currentPath, 'Path copied');
+    copyText(currentPath, '路径已复制');
 }
 
 function copyText(text, successMessage = 'Copied') {
@@ -2014,182 +1967,16 @@ function copyText(text, successMessage = 'Copied') {
             document.execCommand('copy');
             showToast(successMessage);
         } catch (err) {
-            showToast('Copy failed');
+            showToast('复制失败');
         }
         document.body.removeChild(textarea);
     }
 }
 
-// ========================================
-// Share Links
-// ========================================
 
-async function openShareModal() {
-    if (!currentPath) return;
+// Share Links: static/js/share.js
 
-    el.shareError.style.display = 'none';
-    el.shareError.textContent = '';
-    el.shareCurrentFile.textContent = simplifyPath(currentPath);
-    el.shareModal.classList.add('visible');
-    await loadShareLinks();
-}
-
-function closeShareModal() {
-    el.shareModal.classList.remove('visible');
-}
-
-async function loadShareLinks() {
-    if (!currentPath) return;
-
-    el.shareLinks.innerHTML = '<div class="share-empty">Loading...</div>';
-
-    try {
-        const response = await authFetch(`/api/share-links?path=${encodeURIComponent(currentPath)}`);
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to load share links');
-        }
-
-        shareLinksCache = data;
-        renderShareLinks();
-    } catch (error) {
-        console.error('Failed to load share links:', error);
-        el.shareLinks.innerHTML = '<div class="share-empty">Failed to load share links</div>';
-    }
-}
-
-async function createShareLink() {
-    if (!currentPath) return;
-
-    el.shareError.style.display = 'none';
-    el.createShareBtn.disabled = true;
-    el.createShareBtn.textContent = 'Generating...';
-
-    const payload = {
-        path: currentPath,
-        expires_in_hours: Number(el.shareExpiry.value),
-        max_views: el.shareMaxViews.value ? Number(el.shareMaxViews.value) : null
-    };
-
-    try {
-        const response = await authFetch('/api/share-links', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-
-        if (!response.ok) {
-            el.shareError.textContent = data.error || 'Failed to create share link';
-            el.shareError.style.display = 'block';
-            return;
-        }
-
-        shareLinksCache.unshift(data);
-        renderShareLinks();
-        copyText(data.url, 'Share link copied');
-    } catch (error) {
-        console.error('Failed to create share link:', error);
-        el.shareError.textContent = 'Failed to create share link';
-        el.shareError.style.display = 'block';
-    } finally {
-        el.createShareBtn.disabled = false;
-        el.createShareBtn.textContent = '生成只读分享链接';
-    }
-}
-
-function renderShareLinks() {
-    if (!shareLinksCache.length) {
-        el.shareLinks.innerHTML = '<div class="share-empty">还没有分享链接</div>';
-        return;
-    }
-
-    el.shareLinks.innerHTML = '';
-    shareLinksCache.forEach(link => {
-        const item = document.createElement('div');
-        item.className = `share-link-item${link.active ? '' : ' inactive'}`;
-
-        const info = document.createElement('div');
-        info.className = 'share-link-info';
-
-        const url = document.createElement('div');
-        url.className = 'share-link-url';
-        url.textContent = link.url;
-
-        const meta = document.createElement('div');
-        meta.className = 'share-link-meta';
-        const viewsText = link.max_views ? `${link.view_count}/${link.max_views} views` : `${link.view_count} views`;
-        const statusText = link.active ? 'Active' : 'Inactive';
-        meta.textContent = `${statusText} · expires ${formatShareTime(link.expires_at)} · ${viewsText}`;
-
-        info.appendChild(url);
-        info.appendChild(meta);
-
-        const actions = document.createElement('div');
-        actions.className = 'share-link-actions';
-
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'icon-btn';
-        copyBtn.title = 'Copy share link';
-        copyBtn.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="9" width="13" height="13" rx="2"/>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-        `;
-        copyBtn.addEventListener('click', () => copyText(link.url, 'Share link copied'));
-        actions.appendChild(copyBtn);
-
-        if (link.active) {
-            const revokeBtn = document.createElement('button');
-            revokeBtn.className = 'icon-btn danger';
-            revokeBtn.title = 'Revoke share link';
-            revokeBtn.innerHTML = `
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="18" y1="6" x2="6" y2="18"/>
-                    <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-            `;
-            revokeBtn.addEventListener('click', () => revokeShareLink(link.id));
-            actions.appendChild(revokeBtn);
-        }
-
-        item.appendChild(info);
-        item.appendChild(actions);
-        el.shareLinks.appendChild(item);
-    });
-}
-
-async function revokeShareLink(linkId) {
-    try {
-        const response = await authFetch(`/api/share-links/${encodeURIComponent(linkId)}`, {
-            method: 'DELETE'
-        });
-        const data = await response.json();
-
-        if (!response.ok) {
-            showToast(data.error || 'Failed to revoke share link');
-            return;
-        }
-
-        shareLinksCache = shareLinksCache.map(link => link.id === linkId ? data.link : link);
-        renderShareLinks();
-        showToast('Share link revoked');
-    } catch (error) {
-        console.error('Failed to revoke share link:', error);
-        showToast('Failed to revoke share link');
-    }
-}
-
-function formatShareTime(value) {
-    if (!value) return 'never';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleString();
-}
+// formatShareTime: static/js/utils.js
 
 // ========================================
 // Toast
@@ -2252,7 +2039,7 @@ function renderDirectoryList() {
                 <div class="dir-item-name">${escapeHtml(dir.name)}</div>
                 <div class="dir-item-path">${escapeHtml(dir.path)}</div>
             </div>
-            <button class="dir-item-remove" data-index="${index}" title="Remove directory">
+            <button class="dir-item-remove" data-index="${index}" title="移除目录">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="18" y1="6" x2="6" y2="18"/>
                     <line x1="6" y1="6" x2="18" y2="18"/>
@@ -2285,7 +2072,7 @@ function removeDirectory(index) {
 async function saveDirectories() {
     try {
         el.dirSaveBtn.disabled = true;
-        el.dirSaveBtn.textContent = 'Saving...';
+        el.dirSaveBtn.textContent = '保存中...';
 
         const response = await authFetch('/api/directories/config', {
             method: 'POST',
@@ -2298,19 +2085,19 @@ async function saveDirectories() {
         const data = await response.json();
 
         if (response.ok) {
-            showToast('Directories saved successfully');
+            showToast('目录配置已保存');
             closeDirConfig();
             await loadDirectories();
         } else {
-            el.dirError.textContent = data.error || 'Failed to save directories';
+            el.dirError.textContent = data.error || '保存目录失败';
             el.dirError.style.display = 'block';
         }
     } catch (error) {
         console.error('Failed to save directories:', error);
-        showToast('Failed to save directories');
+        showToast('保存目录失败');
     } finally {
         el.dirSaveBtn.disabled = false;
-        el.dirSaveBtn.textContent = 'Save';
+        el.dirSaveBtn.textContent = '保存';
     }
 }
 
@@ -2332,14 +2119,14 @@ async function addDirectory() {
     const path = el.dirPath.value.trim();
 
     if (!name || !path) {
-        el.dirError.textContent = 'Please enter both name and path';
+        el.dirError.textContent = '请填写目录名称和路径';
         el.dirError.style.display = 'block';
         return;
     }
 
     try {
         el.addDirConfirmBtn.disabled = true;
-        el.addDirConfirmBtn.textContent = 'Adding...';
+        el.addDirConfirmBtn.textContent = '添加中...';
 
         // Check if path is valid by temporarily adding to cache and validating
         const tempDir = { name, path };
@@ -2357,18 +2144,18 @@ async function addDirectory() {
             directoriesCache.push(tempDir);
             renderDirectoryList();
             closeAddDir();
-            showToast('Directory added');
+            showToast('目录已添加');
         } else {
-            el.dirError.textContent = testData.error || 'Failed to add directory';
+            el.dirError.textContent = testData.error || '添加目录失败';
             el.dirError.style.display = 'block';
         }
     } catch (error) {
         console.error('Failed to add directory:', error);
-        el.dirError.textContent = 'Failed to add directory';
+        el.dirError.textContent = '添加目录失败';
         el.dirError.style.display = 'block';
     } finally {
         el.addDirConfirmBtn.disabled = false;
-        el.addDirConfirmBtn.textContent = 'Add';
+        el.addDirConfirmBtn.textContent = '添加';
     }
 }
 
@@ -2394,12 +2181,12 @@ function updateTreeFilterButton() {
         el.treeFilterBtn.classList.add('active');
         el.treeFilterBtn.querySelector('.icon-show-empty').style.display = 'none';
         el.treeFilterBtn.querySelector('.icon-hide-empty').style.display = 'block';
-        el.treeFilterBtn.title = 'Hide empty directories';
+        el.treeFilterBtn.title = '隐藏空目录';
     } else {
         el.treeFilterBtn.classList.remove('active');
         el.treeFilterBtn.querySelector('.icon-show-empty').style.display = 'block';
         el.treeFilterBtn.querySelector('.icon-hide-empty').style.display = 'none';
-        el.treeFilterBtn.title = 'Show empty directories';
+        el.treeFilterBtn.title = '显示空目录';
     }
 }
 
@@ -2456,16 +2243,17 @@ function updateFileFilterButtons() {
     // Update image button
     if (showImageFiles) {
         el.imageFilterBtn.classList.add('active');
-        el.imageFilterBtn.title = 'Hide image files';
+        el.imageFilterBtn.title = '隐藏图片';
     } else {
         el.imageFilterBtn.classList.remove('active');
-        el.imageFilterBtn.title = 'Show image files';
+        el.imageFilterBtn.title = '显示图片';
     }
 }
 
 // Hide all dropdown menus
 function hideAllDropdowns() {
     document.querySelectorAll('.tree-dropdown').forEach(dropdown => {
+        dropdown.hidden = true;
         dropdown.style.display = 'none';
     });
 }
@@ -2498,7 +2286,7 @@ function copyTreePath(path) {
     // Check if Clipboard API is available
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(path).then(() => {
-            showToast('Path copied');
+            showToast('路径已复制');
         }).catch(() => {
             // Fallback if Clipboard API fails
             fallbackCopy(path);
@@ -2516,9 +2304,9 @@ function copyTreePath(path) {
         textarea.select();
         try {
             document.execCommand('copy');
-            showToast('Path copied');
+            showToast('路径已复制');
         } catch (err) {
-            showToast('Copy failed');
+            showToast('复制失败');
         }
         document.body.removeChild(textarea);
     }
@@ -2530,7 +2318,22 @@ function copyTreePath(path) {
 
 function getExpandedPaths() {
     const saved = localStorage.getItem('expandedPaths');
-    return saved ? new Set(JSON.parse(saved)) : new Set();
+    if (expandedPathsCache && expandedPathsCacheRaw === saved) {
+        return expandedPathsCache;
+    }
+
+    expandedPathsCache = saved ? new Set(JSON.parse(saved)) : new Set();
+    expandedPathsCacheRaw = saved;
+    return expandedPathsCache;
+}
+
+function persistExpandedPaths(paths) {
+    const list = paths instanceof Set ? Array.from(paths) : Array.from(paths || []);
+    const raw = JSON.stringify(list);
+    expandedPathsCache = new Set(list);
+    expandedPathsCacheRaw = raw;
+    localStorage.setItem('expandedPaths', raw);
+    return expandedPathsCache;
 }
 
 function saveExpandedState() {
@@ -2542,7 +2345,7 @@ function saveExpandedState() {
             paths.push(row.dataset.path);
         }
     });
-    localStorage.setItem('expandedPaths', JSON.stringify(paths));
+    persistExpandedPaths(paths);
 }
 
 function getLoadedExpandableDirectoryPaths(nodes = directoryTreeData, result = []) {
@@ -2571,9 +2374,9 @@ function toggleExpandAll() {
     allExpanded = !allExpanded;
 
     if (allExpanded) {
-        localStorage.setItem('expandedPaths', JSON.stringify(loadedPaths));
+        persistExpandedPaths(loadedPaths);
     } else {
-        localStorage.setItem('expandedPaths', JSON.stringify(getRootDirectoryPaths()));
+        persistExpandedPaths(getRootDirectoryPaths());
     }
 
     renderDirectoryTree();
@@ -2589,11 +2392,11 @@ function updateExpandAllButton() {
     if (allExpanded) {
         expandIcon.style.display = 'none';
         collapseIcon.style.display = 'block';
-        el.expandAllBtn.title = 'Collapse loaded directories';
+        el.expandAllBtn.title = '折叠已加载目录';
     } else {
         expandIcon.style.display = 'block';
         collapseIcon.style.display = 'none';
-        el.expandAllBtn.title = 'Expand loaded directories';
+        el.expandAllBtn.title = '展开已加载目录';
     }
 }
 
@@ -2676,7 +2479,7 @@ async function confirmDelete() {
     try {
         // Disable buttons during deletion
         el.deleteConfirmBtn.disabled = true;
-        el.deleteConfirmBtn.textContent = 'Deleting...';
+        el.deleteConfirmBtn.textContent = '删除中...';
 
         const response = await authFetch('/api/file', {
             method: 'DELETE',
@@ -2690,7 +2493,7 @@ async function confirmDelete() {
 
         if (response.ok) {
             closeDeleteConfirm();
-            showToast('File deleted successfully');
+            showToast('文件已删除');
 
             // Clear current path
             const deletedPath = currentPath;
@@ -2727,15 +2530,15 @@ async function confirmDelete() {
             el.shareBtn.disabled = true;
 
         } else {
-            showToast(data.error || 'Failed to delete file');
+            showToast(data.error || '删除文件失败');
         }
     } catch (error) {
         console.error('Delete failed:', error);
-        showToast('Failed to delete file');
+        showToast('删除文件失败');
     } finally {
         // Re-enable buttons
         el.deleteConfirmBtn.disabled = false;
-        el.deleteConfirmBtn.textContent = 'Delete';
+        el.deleteConfirmBtn.textContent = '删除';
     }
 }
 
@@ -2766,7 +2569,7 @@ async function confirmDeleteDir() {
     try {
         // Disable buttons during deletion
         el.deleteDirConfirmBtn.disabled = true;
-        el.deleteDirConfirmBtn.textContent = 'Deleting...';
+        el.deleteDirConfirmBtn.textContent = '删除中...';
 
         const response = await authFetch('/api/directory', {
             method: 'DELETE',
@@ -2780,7 +2583,7 @@ async function confirmDeleteDir() {
 
         if (response.ok) {
             closeDeleteDirConfirm();
-            showToast('Directory deleted successfully');
+            showToast('目录已删除');
 
             // If the deleted directory contains the current file, clear it
             if (currentPath && currentPath.startsWith(deleteDirPath)) {
@@ -2799,15 +2602,15 @@ async function confirmDeleteDir() {
             // Reload directories to update tree
             await loadDirectories();
         } else {
-            showToast(data.error || 'Failed to delete directory');
+            showToast(data.error || '删除目录失败');
         }
     } catch (error) {
         console.error('Delete directory failed:', error);
-        showToast('Failed to delete directory');
+        showToast('删除目录失败');
     } finally {
         // Re-enable buttons
         el.deleteDirConfirmBtn.disabled = false;
-        el.deleteDirConfirmBtn.textContent = 'Delete';
+        el.deleteDirConfirmBtn.textContent = '删除';
     }
 }
 
@@ -2939,7 +2742,7 @@ async function confirmMoveItem() {
         saveExpandedState();
         const expandedPaths = getExpandedPaths();
         expandedPaths.add(targetDirectory);
-        localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+        persistExpandedPaths(expandedPaths);
         await loadDirectories();
 
         if (wasCurrentFile) {
@@ -2951,7 +2754,7 @@ async function confirmMoveItem() {
             highlightTreeItem(currentPath, {scrollIntoView: false});
         }
 
-        showToast(movedType === 'directory' ? 'Directory moved successfully' : 'File moved successfully');
+        showToast(movedType === 'directory' ? '目录已移动' : '文件已移动');
     } catch (error) {
         console.error('Move item failed:', error);
         el.moveItemError.textContent = '移动失败';
@@ -3012,7 +2815,7 @@ async function confirmCreateFile() {
 
     // Disable buttons during creation
     el.createFileConfirmBtn.disabled = true;
-    el.createFileConfirmBtn.textContent = 'Creating...';
+    el.createFileConfirmBtn.textContent = '创建中...';
 
     try {
         const response = await authFetch('/api/file', {
@@ -3024,7 +2827,7 @@ async function confirmCreateFile() {
         const data = await response.json();
 
         if (response.ok && data.success) {
-            showToast('File created successfully');
+            showToast('文件已创建');
             closeCreateFileModal();
 
             // Reload directories to update tree
@@ -3034,12 +2837,12 @@ async function confirmCreateFile() {
             loadFile(data.path, data.name);
             enterEditMode();
         } else {
-            el.createFileError.textContent = data.error || 'Failed to create file';
+            el.createFileError.textContent = data.error || '创建文件失败';
             el.createFileError.style.display = 'block';
         }
     } catch (error) {
         console.error('Create file failed:', error);
-        el.createFileError.textContent = 'Failed to create file';
+        el.createFileError.textContent = '创建文件失败';
         el.createFileError.style.display = 'block';
     } finally {
         // Re-enable buttons
@@ -3089,7 +2892,7 @@ async function confirmCreateDir() {
 
     // Disable buttons during creation
     el.createDirConfirmBtn.disabled = true;
-    el.createDirConfirmBtn.textContent = 'Creating...';
+    el.createDirConfirmBtn.textContent = '创建中...';
 
     try {
         const response = await authFetch('/api/directory', {
@@ -3101,22 +2904,22 @@ async function confirmCreateDir() {
         const data = await response.json();
 
         if (response.ok && data.success) {
-            showToast('Directory created successfully');
+            showToast('目录已创建');
             closeCreateDirModal();
 
             saveExpandedState();
             const expandedPaths = getExpandedPaths();
             expandedPaths.add(createDirParentPath);
-            localStorage.setItem('expandedPaths', JSON.stringify(Array.from(expandedPaths)));
+            persistExpandedPaths(expandedPaths);
 
             await loadDirectories();
         } else {
-            el.createDirError.textContent = data.error || 'Failed to create directory';
+            el.createDirError.textContent = data.error || '创建目录失败';
             el.createDirError.style.display = 'block';
         }
     } catch (error) {
         console.error('Create directory failed:', error);
-        el.createDirError.textContent = 'Failed to create directory';
+        el.createDirError.textContent = '创建目录失败';
         el.createDirError.style.display = 'block';
     } finally {
         // Re-enable buttons
@@ -3183,7 +2986,7 @@ let editPreviewTimeout = null;
 
 function enterEditMode() {
     if (currentRawContent === null) {
-        showToast('No file loaded');
+        showToast('未打开文件');
         return;
     }
 
@@ -3288,7 +3091,7 @@ async function saveAndExitEditMode() {
         const data = await response.json();
 
         if (response.ok) {
-            showToast('File saved');
+            showToast('文件已保存');
 
             // Exit edit mode
             exitEditMode();
@@ -3296,11 +3099,11 @@ async function saveAndExitEditMode() {
             // Reload file to show updated content
             await loadFile(currentPath);
         } else {
-            showToast(data.error || 'Failed to save file');
+            showToast(data.error || '保存文件失败');
         }
     } catch (error) {
         console.error('Save failed:', error);
-        showToast('Failed to save file');
+        showToast('保存文件失败');
     } finally {
         el.saveBtn.disabled = false;
     }
@@ -3394,7 +3197,10 @@ function performDocSearch(query) {
 
     // Get current content container
     const contentContainer = getCurrentContentContainer();
-    if (!contentContainer) return;
+    if (!contentContainer || !query) {
+        updateDocSearchCount();
+        return 0;
+    }
 
     // Find all text nodes in the content
     const textNodes = [];
@@ -3435,6 +3241,8 @@ function performDocSearch(query) {
     // Highlight matches
     textNodes.forEach(textNode => {
         const text = textNode.textContent;
+        // Reset before test+exec cycle
+        regex.lastIndex = 0;
         if (!regex.test(text)) return;
 
         const fragment = document.createDocumentFragment();
@@ -3476,6 +3284,8 @@ function performDocSearch(query) {
         docSearchIndex = 0;
         highlightCurrentMatch();
     }
+
+    return docSearchHighlightSpans.length;
 }
 
 function navigateDocSearch(direction) {
