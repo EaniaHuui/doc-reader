@@ -97,6 +97,29 @@ def rewrite_shared_image_urls(html_content: str, share_token: str) -> str:
     return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
 
 
+def rewrite_view_image_urls(html_content: str, document_path: Path) -> str:
+    """Rewrite image URLs for the lightweight /view page (cookie/JWT auth)."""
+    base_dir = Path(document_path).parent
+
+    def replace_src(match):
+        prefix = match.group(1)
+        quote_char = match.group(2)
+        src = match.group(3)
+
+        if src.startswith(('http://', 'https://')):
+            proxied = f'/api/remote-image?url={quote(src, safe="")}'
+            return f'{prefix}{quote_char}{proxied}{quote_char}'
+
+        if re.match(r'^//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
+            return match.group(0)
+
+        absolute = (base_dir / src).resolve()
+        image_src = f'/api/image?path={quote(simplify_path(absolute), safe="")}'
+        return f'{prefix}{quote_char}{image_src}{quote_char}'
+
+    return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
+
+
 def render_image_file(file_path):
     """Return a read-only image preview payload."""
     file_path = Path(file_path)

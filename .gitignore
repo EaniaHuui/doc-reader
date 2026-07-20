@@ -47,6 +47,9 @@ directories.json
 share_links.json
 illustrator.sqlite3
 server.log
+data/doc_reader.db
+data/doc_reader.db-*
+data/trash/
 docs/brainstorms/
 docs/plans/
 

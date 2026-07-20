@@ -1,159 +1,264 @@
 #!/usr/bin/env python3
 """Doc Reader - 轻量级文档阅读器
 
-Route layer only. Business logic lives under the `reader` package.
+Route layer: HTML pages + share links. JSON API lives under /api/v1.
 """
 
 from __future__ import annotations
 
-import json
-import re
+import html
+import logging
 import secrets
-import shutil
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote, unquote
-from urllib.request import Request, build_opener
+from urllib.parse import quote
 
-from flask import Flask, Response, jsonify, render_template, request, send_file, abort
-import html
+from flask import Flask, jsonify, render_template, request
 
-from reader.auth import (
-    clear_login_failures,
-    decode_token,
-    generate_token,
-    get_users,
-    is_auth_enabled,
-    is_login_rate_limited,
-    login_required,
-    record_login_failure,
-    verify_password,
-)
-from reader.constants import (
-    IMAGE_EXTENSIONS,
-    REMOTE_IMAGE_MAX_BYTES,
-    REMOTE_IMAGE_TIMEOUT_SECONDS,
-)
-from reader.fs_ops import (
-    get_directory_listing,
-    read_text_file,
-    search_files,
-)
+from reader.api.v1 import api_v1_bp
+from reader.auth import get_auth_payload, is_auth_enabled, login_required
+from reader.constants import IMAGE_EXTENSIONS
+from reader.db import init_db
+from reader.documents_service import read_document
+from reader.errors import ApiError, error_response, register_error_handlers
+from reader.fts_index import rescan_all
 from reader.markdown_utils import (
-    read_markdown_file,
     render_image_file,
     render_markdown,
     rewrite_shared_image_urls,
+    rewrite_view_image_urls,
 )
-from reader.paths import expand_path, is_path_in_directories, simplify_path, validate_move_paths
-from reader.security import SafeRedirectHandler, is_public_remote_url
+from reader.fs_ops import read_text_file
+from reader.paths import expand_path, is_path_in_directories, simplify_path
+from reader.roots import sync_roots_from_config
 from reader.share import (
     find_share_link,
     increment_share_view,
     is_share_link_active,
     public_share_data,
     serialize_datetime,
-    update_share_links_for_move,
 )
-from reader.storage import (
-    get_config,
-    load_directories_config,
-    load_share_links,
-    save_directories_config,
-    save_share_links,
-)
+from reader.storage import get_config, load_share_links, save_share_links
+from reader.trash_ops import cleanup_expired
+from reader.pathutil import resolve_in_root
+from reader.timeutil import from_mtime
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config['MAX_CONTENT_LENGTH'] = 12 * 1024 * 1024
+
+register_error_handlers(app)
+app.register_blueprint(api_v1_bp)
 
 config = get_config()
 
 
-def request_has_valid_auth_or_share():
-    """Allow remote assets for logged-in users or active share pages."""
-    share_token = request.args.get('share_token', '')
-    if share_token:
-        return is_share_link_active(find_share_link(share_token), enforce_view_limit=False)
+def _bootstrap_server() -> None:
+    """Initialize SQLite, import directory roots, build FTS index."""
+    init_db()
+    sync_roots_from_config()
 
-    if not is_auth_enabled():
-        return True
+    def _bg():
+        try:
+            count = rescan_all()
+            logger.info('FTS index ready: %s documents', count)
+        except Exception as exc:
+            logger.warning('FTS rescan failed: %s', exc)
+        try:
+            cleanup_expired()
+        except Exception as exc:
+            logger.warning('Trash cleanup failed: %s', exc)
 
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if not token:
-        token = request.args.get('token', '')
+    threading.Thread(target=_bg, daemon=True).start()
 
-    return decode_token(token) is not None if token else False
+    def _periodic():
+        import time
+        while True:
+            time.sleep(3600)
+            try:
+                cleanup_expired()
+            except Exception:
+                pass
+
+    threading.Thread(target=_periodic, daemon=True).start()
 
 
-# ========================================
-# Authentication Routes
-# ========================================
+_bootstrap_server()
 
-@app.route('/api/auth/status', methods=['GET'])
-def api_auth_status():
-    """Check authentication status."""
-    if not is_auth_enabled():
-        return jsonify({'enabled': False, 'authenticated': True})
-
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Bearer '):
-        token = auth_header.split(' ')[1]
-        payload = decode_token(token)
-        if payload:
-            return jsonify({
-                'enabled': True,
-                'authenticated': True,
-                'username': payload.get('username')
-            })
-
-    return jsonify({'enabled': True, 'authenticated': False})
-
-@app.route('/api/auth/login', methods=['POST'])
-def api_auth_login():
-    """Handle user login."""
-    if not is_auth_enabled():
-        return jsonify({'error': '认证未启用'}), 400
-
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
-    if client_ip and ',' in client_ip:
-        client_ip = client_ip.split(',', 1)[0].strip()
-
-    if is_login_rate_limited(client_ip):
-        return jsonify({
-            'error': '登录尝试过于频繁，请稍后再试'
-        }), 429
-
-    data = request.get_json(silent=True) or {}
-    username = data.get('username')
-    password = data.get('password')
-
-    if not username or not password:
-        return jsonify({'error': '请输入用户名和密码'}), 400
-
-    users = get_users()
-    if username not in users or not verify_password(password, users[username]):
-        record_login_failure(client_ip)
-        return jsonify({'error': '用户名或密码错误'}), 401
-
-    clear_login_failures(client_ip)
-    token = generate_token(username)
-    return jsonify({
-        'token': token,
-        'username': username
-    })
-
-@app.route('/api/auth/logout', methods=['POST'])
-def api_auth_logout():
-    """Handle user logout (client-side token removal)."""
-    return jsonify({'success': True})
 
 # ========================================
-# Content Routes
+# HTML Routes (desktop + share)
 # ========================================
 
 @app.route('/')
 def index():
     return render_template('index.html', config=config)
+
+
+@app.route('/view')
+def view_document():
+    """Lightweight read-only document page for knowledge-base deep links.
+
+    Prefer ``?root_id=&path=``; legacy ``?file=`` absolute/~/ paths still work.
+    """
+    root_id = (request.args.get('root_id') or '').strip()
+    rel_path = (request.args.get('path') or '').strip()
+    raw_path = (request.args.get('file') or '').strip()
+
+    if root_id and rel_path:
+        full_reader_url = f'/?root_id={quote(root_id, safe="")}&path={quote(rel_path, safe="")}'
+        if is_auth_enabled() and get_auth_payload() is None:
+            return render_template(
+                'view.html',
+                need_auth=True,
+                file_param=rel_path,
+                full_reader_url=full_reader_url,
+            )
+        try:
+            doc = read_document(root_id, rel_path)['document']
+            html_content = render_markdown(doc['raw_content']) if doc['type'] == 'markdown' else None
+            if doc['type'] == 'txt':
+                html_content = f'<pre class="text-file-content">{html.escape(doc["raw_content"])}</pre>'
+            elif doc['type'] == 'json':
+                content = doc.get('formatted_content') or doc['raw_content']
+                html_content = (
+                    f'<pre class="text-file-content"><code class="language-json">'
+                    f'{html.escape(content)}</code></pre>'
+                )
+            _, _, abs_path = resolve_in_root(root_id, rel_path)
+            if html_content:
+                html_content = rewrite_view_image_urls_v1(html_content, root_id, rel_path)
+            return render_template(
+                'view.html',
+                document={
+                    'title': doc['title'],
+                    'content': html_content,
+                    'path': f'{root_id}:{rel_path}',
+                    'modified': doc.get('modified_at', ''),
+                },
+                display_path=rel_path,
+                full_reader_url=full_reader_url,
+            )
+        except ApiError as exc:
+            status = exc.status
+            return render_template(
+                'view.html',
+                error=exc.message,
+                full_reader_url=full_reader_url,
+            ), status
+
+    if not raw_path:
+        return render_template(
+            'view.html',
+            error='缺少文件路径。请使用 /view?root_id=...&path=... 或 /view?file=~/project/...',
+        ), 400
+
+    full_reader_url = '/?file=' + quote(raw_path, safe='')
+
+    if is_auth_enabled() and get_auth_payload() is None:
+        return render_template(
+            'view.html',
+            need_auth=True,
+            file_param=raw_path,
+            full_reader_url=full_reader_url,
+        )
+
+    file_path = expand_path(raw_path)
+    if not is_path_in_directories(file_path):
+        return render_template(
+            'view.html',
+            error='无权限访问该文件',
+            full_reader_url=full_reader_url,
+        ), 403
+
+    if not file_path.exists() or not file_path.is_file():
+        return render_template(
+            'view.html',
+            error='文件不存在',
+            full_reader_url=full_reader_url,
+        ), 404
+
+    file_ext = file_path.suffix.lower()
+    if file_ext == '.md':
+        from reader.markdown_utils import read_markdown_file
+        data, error = read_markdown_file(file_path)
+    elif file_ext in ['.txt', '.json']:
+        data, error = read_text_file(file_path, file_ext)
+    elif file_ext in IMAGE_EXTENSIONS:
+        data, error = render_image_file(file_path)
+    else:
+        data, error = None, '不支持的文件类型'
+
+    if error:
+        return render_template(
+            'view.html',
+            error=error,
+            full_reader_url=full_reader_url,
+        ), 404
+
+    if data.get('content'):
+        if data.get('fileType') == 'image':
+            data['content'] = rewrite_view_image_urls(
+                _image_html_for_legacy(file_path), file_path
+            )
+        else:
+            data['content'] = rewrite_view_image_urls(data['content'], file_path)
+
+    return render_template(
+        'view.html',
+        document=data,
+        display_path=simplify_path(file_path),
+        full_reader_url=full_reader_url,
+    )
+
+
+def _image_html_for_legacy(file_path: Path) -> str:
+    escaped_name = html.escape(file_path.name)
+    # Keep using rewrite_view_image_urls path builder via a synthetic img
+    return f'<img src="{html.escape(file_path.name)}" alt="{escaped_name}">'
+
+
+def rewrite_view_image_urls_v1(html_content: str, root_id: str, rel_path: str) -> str:
+    """Rewrite relative images to /api/v1/assets for root-relative documents."""
+    import re
+    from urllib.parse import quote as q
+
+    base_dir = str(Path(rel_path).parent).replace('\\', '/')
+    if base_dir == '.':
+        base_dir = ''
+
+    def replace_src(match):
+        prefix = match.group(1)
+        quote_char = match.group(2)
+        src = match.group(3)
+        if src.startswith(('http://', 'https://')):
+            proxied = f'/api/v1/remote-image?url={q(src, safe="")}'
+            return f'{prefix}{quote_char}{proxied}{quote_char}'
+        if re.match(r'^//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
+            return match.group(0)
+        if base_dir:
+            asset_rel = f'{base_dir}/{src}'.replace('//', '/')
+        else:
+            asset_rel = src
+        # normalize .. in relative asset path lightly
+        parts = []
+        for p in asset_rel.split('/'):
+            if p in ('', '.'):
+                continue
+            if p == '..':
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(p)
+        asset_rel = '/'.join(parts)
+        asset_src = f'/api/v1/assets?root_id={q(root_id)}&path={q(asset_rel, safe="")}'
+        return f'{prefix}{quote_char}{asset_src}{quote_char}'
+
+    return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
+
 
 @app.route('/share/<token>')
 def share_page(token):
@@ -169,6 +274,7 @@ def share_page(token):
     file_ext = file_path.suffix.lower()
 
     if file_ext == '.md':
+        from reader.markdown_utils import read_markdown_file
         data, error = read_markdown_file(file_path)
     elif file_ext in ['.txt', '.json']:
         data, error = read_text_file(file_path, file_ext)
@@ -185,14 +291,14 @@ def share_page(token):
     if data.get('content'):
         if data.get('fileType') == 'image':
             escaped_name = html.escape(file_path.name)
-            image_url = f'/api/image?share_token={quote(token, safe="")}&src={quote(file_path.name, safe="")}'
+            image_url = f'/api/share/image?share_token={quote(token, safe="")}&src={quote(file_path.name, safe="")}'
             data['content'] = (
                 '<div class="image-file-viewer">'
                 f'<img src="{image_url}" alt="{escaped_name}">'
                 '</div>'
             )
         else:
-            data['content'] = rewrite_shared_image_urls(data['content'], token)
+            data['content'] = rewrite_shared_image_urls_v1(data['content'], token)
 
     return render_template(
         'share.html',
@@ -200,35 +306,81 @@ def share_page(token):
         expires_at=link.get('expires_at')
     )
 
+
+def rewrite_shared_image_urls_v1(html_content: str, share_token: str) -> str:
+    import re
+    from urllib.parse import quote as q
+
+    def replace_src(match):
+        prefix = match.group(1)
+        quote_char = match.group(2)
+        src = match.group(3)
+        if src.startswith(('http://', 'https://')):
+            shared_src = (
+                f'/api/share/remote-image?url={q(src, safe="")}'
+                f'&share_token={q(share_token, safe="")}'
+            )
+            return f'{prefix}{quote_char}{shared_src}{quote_char}'
+        if re.match(r'^//', src) or src.startswith(('data:', 'mailto:', '#', '/')):
+            return match.group(0)
+        shared_src = (
+            f'/api/share/image?share_token={q(share_token, safe="")}'
+            f'&src={q(src, safe="")}'
+        )
+        return f'{prefix}{quote_char}{shared_src}{quote_char}'
+
+    return re.sub(r'(<img\b[^>]*\bsrc=)(["\'])([^"\']+)\2', replace_src, html_content)
+
+
+# ========================================
+# Share-link management (desktop-only, not /api/v1 mobile contract)
+# ========================================
+
 @app.route('/api/share-links', methods=['GET', 'POST'])
 @login_required
 def api_share_links():
-    """List or create share links for one file."""
     if request.method == 'GET':
         file_path = request.args.get('path')
+        root_id = request.args.get('root_id')
         links = load_share_links()
 
-        if file_path:
+        if root_id and file_path:
+            try:
+                _, _, abs_p = resolve_in_root(root_id, file_path)
+                file_path = str(abs_p)
+            except ApiError:
+                file_path = str(expand_path(file_path))
+            links = [link for link in links if str(expand_path(link.get('path', ''))) == file_path]
+        elif file_path:
             file_path = str(expand_path(file_path))
             links = [link for link in links if str(expand_path(link.get('path', ''))) == file_path]
 
         return jsonify([public_share_data(link) for link in links])
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     file_path = data.get('path')
+    root_id = data.get('root_id')
     expires_in_hours = data.get('expires_in_hours', 24)
     max_views = data.get('max_views')
 
-    if not file_path:
-        return jsonify({'error': '缺少文件路径'}), 400
+    if root_id and file_path:
+        try:
+            _, _, abs_path = resolve_in_root(root_id, file_path)
+            file_path = abs_path
+        except ApiError as exc:
+            return error_response(exc.code, exc.message, exc.status)
+    elif file_path:
+        file_path = expand_path(file_path)
+    else:
+        return error_response('validation_error', '缺少文件路径', 422)
 
     try:
         expires_in_hours = int(expires_in_hours)
     except (TypeError, ValueError):
-        return jsonify({'error': '有效期必须是数字'}), 400
+        return error_response('validation_error', '有效期必须是数字', 422)
 
     if expires_in_hours <= 0 or expires_in_hours > 24 * 365:
-        return jsonify({'error': '有效期必须在 1 小时到 365 天之间'}), 400
+        return error_response('validation_error', '有效期必须在 1 小时到 365 天之间', 422)
 
     if max_views in ('', None):
         max_views = None
@@ -236,20 +388,18 @@ def api_share_links():
         try:
             max_views = int(max_views)
         except (TypeError, ValueError):
-            return jsonify({'error': '访问次数必须是数字'}), 400
+            return error_response('validation_error', '访问次数必须是数字', 422)
         if max_views <= 0 or max_views > 100000:
-            return jsonify({'error': '访问次数必须在 1 到 100000 之间'}), 400
-
-    file_path = expand_path(file_path)
+            return error_response('validation_error', '访问次数必须在 1 到 100000 之间', 422)
 
     if not is_path_in_directories(file_path):
-        return jsonify({'error': '无权限分享该文件'}), 403
+        return error_response('forbidden', '无权限分享该文件', 403)
 
     if not file_path.exists() or not file_path.is_file():
-        return jsonify({'error': '文件不存在'}), 404
+        return error_response('not_found', '文件不存在', 404)
 
     if file_path.suffix.lower() not in ['.md', '.txt', '.json', *IMAGE_EXTENSIONS]:
-        return jsonify({'error': '不支持分享该文件类型'}), 400
+        return error_response('unsupported_type', '不支持分享该文件类型', 422)
 
     now = datetime.utcnow()
     link = {
@@ -261,501 +411,103 @@ def api_share_links():
         'permission': 'read',
         'expires_at': serialize_datetime(now + timedelta(hours=expires_in_hours)),
         'created_at': serialize_datetime(now),
-        'created_by': getattr(request, 'user', {}).get('username', 'local'),
+        'created_by': (getattr(request, 'user', None) or {}).get('username', 'local'),
         'revoked_at': None,
         'max_views': max_views,
         'view_count': 0,
-        'last_viewed_at': None
+        'last_viewed_at': None,
     }
 
     links = load_share_links()
     links.append(link)
     save_share_links(links)
-
     return jsonify(public_share_data(link)), 201
+
 
 @app.route('/api/share-links/<link_id>', methods=['DELETE'])
 @login_required
 def api_revoke_share_link(link_id):
-    """Revoke a share link."""
     links = load_share_links()
-
     for link in links:
         if link.get('id') == link_id:
             if not link.get('revoked_at'):
                 link['revoked_at'] = serialize_datetime(datetime.utcnow())
                 save_share_links(links)
             return jsonify({'success': True, 'link': public_share_data(link)})
+    return error_response('not_found', '分享链接不存在', 404)
 
-    return jsonify({'error': '分享链接不存在'}), 404
 
-@app.route('/api/directories')
-@login_required
-def api_directories():
-    # 获取文件类型参数
-    file_types = ['.md']
-    show_txt = request.args.get('txt', 'false').lower() == 'true'
-    show_json = request.args.get('json', 'false').lower() == 'true'
-    show_images = request.args.get('images', 'true').lower() == 'true'
-    target_path = request.args.get('path')
+@app.route('/api/share/image')
+def api_share_image():
+    """Public image serving for active share pages only."""
+    from flask import abort, send_file
 
-    if show_txt:
-        file_types.append('.txt')
-    if show_json:
-        file_types.append('.json')
-    if show_images:
-        file_types.extend(sorted(IMAGE_EXTENSIONS))
-
-    if target_path:
-        target_dir = expand_path(target_path)
-        if not is_path_in_directories(target_dir):
-            return jsonify({'error': '无权限访问该目录'}), 403
-        if not target_dir.exists():
-            return jsonify({'error': '目录不存在'}), 404
-        if not target_dir.is_dir():
-            return jsonify({'error': '目标路径不是目录'}), 400
-
-        tree = get_directory_listing(target_dir, file_types=file_types)
-        if tree is None:
-            return jsonify({'error': '目录不存在'}), 404
-        return jsonify(tree.get('children', []))
-
-    trees = []
-    for directory in load_directories_config():
-        tree = get_directory_listing(directory['path'], directory['name'], file_types)
-        if tree:
-            trees.append(tree)
-    return jsonify(trees)
-
-@app.route('/api/render', methods=['POST'])
-@login_required
-def api_render():
-    """Render markdown content to HTML for live preview"""
-    data = request.get_json()
-    content = data.get('content', '')
-    file_path = data.get('path', '')
-
-    # Determine file type
-    ext = file_path.split('.')[-1].lower() if file_path else 'md'
-
-    if ext == 'json':
-        # For JSON files, render as formatted code
-        try:
-            parsed = json.loads(content)
-            formatted = json.dumps(parsed, indent=2, ensure_ascii=False)
-            html_content = f'<pre class="text-file-content"><code class="language-json">{html.escape(formatted)}</code></pre>'
-        except json.JSONDecodeError:
-            html_content = f'<pre class="text-file-content"><code>{html.escape(content)}</code></pre>'
-    elif ext == 'txt':
-        # For TXT files, render as plain text
-        html_content = f'<pre class="text-file-content">{html.escape(content)}</pre>'
-    else:
-        # For Markdown files, render with marked
-        html_content = render_markdown(content)
-
-    return jsonify({'content': html_content})
-
-
-@app.route('/api/file', methods=['GET', 'POST', 'DELETE', 'PUT'])
-@login_required
-def api_file():
-    # POST method - create file
-    if request.method == 'POST':
-        data = request.get_json()
-        file_path = data.get('path') if data else None
-        content = data.get('content', '')  # 默认空白内容
-
-        if not file_path:
-            return jsonify({'error': '缺少文件路径'}), 400
-
-        # 展开路径（支持 ~ 符号）
-        file_path = expand_path(file_path)
-
-        # 验证文件名合法性
-        import re
-        filename = file_path.name
-        if not filename or filename in ['.', '..']:
-            return jsonify({'error': '无效的文件名'}), 400
-        if re.search(r'[/\\:*?"<>|]', filename):
-            return jsonify({'error': '文件名包含非法字符'}), 400
-
-        # 验证文件路径在允许的目录内（使用动态配置）
-        if not is_path_in_directories(file_path):
-            return jsonify({'error': '无权限在该目录创建文件'}), 403
-
-        # 检查父目录是否存在
-        if not file_path.parent.exists():
-            return jsonify({'error': '父目录不存在'}), 400
-
-        # 检查文件是否已存在
-        if file_path.exists():
-            return jsonify({'error': '文件已存在'}), 409
-
-        try:
-            # 创建空白文件
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-
-            return jsonify({
-                'success': True,
-                'path': simplify_path(file_path),
-                'name': file_path.name
-            })
-        except Exception as e:
-            return jsonify({'error': f'创建文件失败: {str(e)}'}), 500
-
-    # PUT method - save file
-    if request.method == 'PUT':
-        data = request.get_json()
-        file_path = data.get('path') if data else None
-        content = data.get('content') if data else None
-
-        if not file_path:
-            return jsonify({'error': '缺少文件路径'}), 400
-        if content is None:
-            return jsonify({'error': '缺少文件内容'}), 400
-
-        # 展开路径（支持 ~ 符号）
-        file_path = expand_path(file_path)
-
-        # 验证文件路径在允许的目录内
-        if not is_path_in_directories(file_path):
-            return jsonify({'error': '无权限访问该文件'}), 403
-
-        if not file_path.exists():
-            return jsonify({'error': '文件不存在'}), 404
-
-        try:
-            # 写入文件
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-
-            # 返回更新后的文件信息
-            mtime = file_path.stat().st_mtime
-            modified_time = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
-
-            return jsonify({
-                'success': True,
-                'modified': modified_time
-            })
-        except Exception as e:
-            return jsonify({'error': f'保存文件失败: {str(e)}'}), 500
-
-    # DELETE method - delete file
-    if request.method == 'DELETE':
-        data = request.get_json()
-        file_path = data.get('path') if data else None
-        if not file_path:
-            return jsonify({'error': '缺少文件路径'}), 400
-
-        # 展开路径（支持 ~ 符号）
-        file_path = expand_path(file_path)
-
-        # 验证文件路径在允许的目录内
-        if not is_path_in_directories(file_path):
-            return jsonify({'error': '无权限访问该文件'}), 403
-
-        if not file_path.exists():
-            return jsonify({'error': '文件不存在'}), 404
-
-        try:
-            file_path.unlink()
-            return jsonify({'success': True})
-        except Exception as e:
-            return jsonify({'error': f'删除文件失败: {str(e)}'}), 500
-
-    # GET method - read file
-    file_path = request.args.get('path')
-    if not file_path:
-        return jsonify({'error': '缺少文件路径'}), 400
-
-    # 展开路径（支持 ~ 符号）
-    file_path = expand_path(file_path)
-
-    # 验证文件路径在允许的目录内
-    if not is_path_in_directories(file_path):
-        return jsonify({'error': '无权限访问该文件'}), 403
-
-    # 判断文件类型
-    file_ext = Path(file_path).suffix.lower()
-
-    if file_ext == '.md':
-        data, error = read_markdown_file(file_path)
-    elif file_ext in ['.txt', '.json']:
-        data, error = read_text_file(file_path, file_ext)
-    elif file_ext in IMAGE_EXTENSIONS:
-        data, error = render_image_file(file_path)
-    else:
-        data, error = None, "不支持的文件类型"
-
-    if error:
-        return jsonify({'error': error}), 404
-
-    return jsonify(data)
-
-
-@app.route('/api/directory', methods=['POST', 'DELETE'])
-@login_required
-def api_directory():
-    """创建或删除目录"""
-    # POST method - create directory
-    if request.method == 'POST':
-        data = request.get_json()
-        dir_path = data.get('path') if data else None
-
-        if not dir_path:
-            return jsonify({'error': '缺少目录路径'}), 400
-
-        # 展开路径（支持 ~ 符号）
-        dir_path = expand_path(dir_path)
-
-        # 验证目录名合法性
-        import re
-        dirname = dir_path.name
-        if not dirname or dirname in ['.', '..']:
-            return jsonify({'error': '无效的目录名'}), 400
-        if re.search(r'[/\\:*?"<>|]', dirname):
-            return jsonify({'error': '目录名包含非法字符'}), 400
-
-        # 验证目录路径在允许的目录内（使用动态配置）
-        if not is_path_in_directories(dir_path):
-            return jsonify({'error': '无权限在该目录创建子目录'}), 403
-
-        # 检查父目录是否存在
-        if not dir_path.parent.exists():
-            return jsonify({'error': '父目录不存在'}), 400
-
-        # 检查目录是否已存在
-        if dir_path.exists():
-            return jsonify({'error': '目录已存在'}), 409
-
-        try:
-            dir_path.mkdir(parents=False)
-            return jsonify({
-                'success': True,
-                'path': simplify_path(dir_path),
-                'name': dir_path.name
-            })
-        except Exception as e:
-            return jsonify({'error': f'创建目录失败: {str(e)}'}), 500
-
-    # DELETE method - delete directory
-    data = request.get_json()
-    dir_path = data.get('path') if data else None
-    if not dir_path:
-        return jsonify({'error': '缺少目录路径'}), 400
-
-    # 展开路径（支持 ~ 符号）
-    dir_path = expand_path(dir_path)
-
-    # 验证目录路径在允许的目录内
-    if not is_path_in_directories(dir_path):
-        return jsonify({'error': '无权限访问该目录'}), 403
-
-    if not dir_path.exists():
-        return jsonify({'error': '目录不存在'}), 404
-
-    if not dir_path.is_dir():
-        return jsonify({'error': '路径不是目录'}), 400
-
-    try:
-        shutil.rmtree(dir_path)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': f'删除目录失败: {str(e)}'}), 500
-
-@app.route('/api/move', methods=['POST'])
-@login_required
-def api_move():
-    """Move a file or directory into an existing directory."""
-    data = request.get_json() or {}
-    source_path = data.get('source_path')
-    target_directory = data.get('target_directory')
-
-    if not source_path:
-        return jsonify({'error': '缺少源路径'}), 400
-
-    if not target_directory:
-        return jsonify({'error': '缺少目标目录'}), 400
-
-    destination_path, error = validate_move_paths(source_path, target_directory)
-    if error:
-        message, status = error
-        return jsonify({'error': message}), status
-
-    source_path = expand_path(source_path)
-
-    try:
-        source_type = 'directory' if source_path.is_dir() else 'file'
-        source_path.rename(destination_path)
-        update_share_links_for_move(source_path, destination_path)
-        return jsonify({
-            'success': True,
-            'type': source_type,
-            'source_path': simplify_path(source_path),
-            'target_directory': simplify_path(expand_path(target_directory)),
-            'destination_path': simplify_path(destination_path),
-            'name': destination_path.name
-        })
-    except Exception as e:
-        return jsonify({'error': f'移动失败: {str(e)}'}), 500
-
-
-@app.route('/api/search')
-@login_required
-def api_search():
-    query = request.args.get('q', '').strip()
-    if not query:
-        return jsonify([])
-
-    results = search_files(query, load_directories_config())
-    return jsonify(results)
-
-@app.route('/api/preview', methods=['POST'])
-@login_required
-def api_preview():
-    """Preview markdown content (for real-time editing)"""
-    data = request.get_json()
-    content = data.get('content', '') if data else ''
-    html_content = render_markdown(content)
-    return jsonify({'content': html_content})
-
-# ========================================
-# Directory Configuration Routes
-# ========================================
-
-@app.route('/api/directories/config', methods=['GET'])
-@login_required
-def api_get_directories_config():
-    """获取目录配置列表"""
-    directories = load_directories_config()
-    return jsonify(directories)
-
-@app.route('/api/directories/config', methods=['POST'])
-@login_required
-def api_update_directories_config():
-    """更新目录配置列表"""
-    try:
-        data = request.get_json()
-        directories = data.get('directories', [])
-
-        # 验证每个目录
-        for directory in directories:
-            if not directory.get('name') or not directory.get('path'):
-                return jsonify({'error': '目录名称和路径不能为空'}), 400
-
-            # 验证路径是否存在
-            path = expand_path(directory['path'])
-            if not path.exists():
-                return jsonify({'error': f'路径不存在: {directory["path"]}'}), 400
-
-        # 保存配置
-        save_directories_config(directories)
-        return jsonify({'success': True, 'directories': directories})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/image')
-def api_image():
-    """Serve image files from the configured directories."""
     share_token = request.args.get('share_token', '')
     share_src = request.args.get('src', '')
+    link = find_share_link(share_token)
+    if not is_share_link_active(link, enforce_view_limit=False):
+        return error_response('unauthorized', '无效或过期的分享令牌', 401)
 
-    if share_token:
-        link = find_share_link(share_token)
-        if not is_share_link_active(link, enforce_view_limit=False):
-            return jsonify({'error': 'Invalid or expired share token'}), 401
+    base_path = expand_path(link['path']).parent
+    image_path = (base_path / share_src).resolve()
+    try:
+        image_path.relative_to(base_path.resolve())
+    except ValueError:
+        return error_response('forbidden', '无效的图片路径', 403)
 
-        base_path = expand_path(link['path']).parent
-        image_path = (base_path / share_src).resolve()
-
-        try:
-            image_path.relative_to(base_path)
-        except ValueError:
-            return jsonify({'error': 'Invalid image path'}), 403
-    elif is_auth_enabled():
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
-        if not token:
-            token = request.args.get('token', '')
-
-        if not token:
-            return jsonify({'error': 'Unauthorized'}), 401
-
-        payload = decode_token(token)
-        if payload is None:
-            return jsonify({'error': 'Invalid or expired token'}), 401
-
-        image_path = request.args.get('path')
-        if not image_path:
-            return jsonify({'error': '缺少文件路径'}), 400
-
-        image_path = expand_path(image_path)
-    else:
-        image_path = request.args.get('path')
-        if not image_path:
-            return jsonify({'error': '缺少文件路径'}), 400
-
-        image_path = expand_path(image_path)
-
-        # 验证路径是否在配置的目录内
-    if not is_path_in_directories(image_path):
-        abort(403)
-
-    if not image_path.exists():
+    if not image_path.exists() or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
         abort(404)
 
-    # 检查文件扩展名
-    if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
-        abort(403)
+    resp = send_file(str(image_path))
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
-    try:
-        return send_file(str(image_path))
-    except Exception as e:
-        abort(500)
 
-@app.route('/api/remote-image')
-def api_remote_image():
-    """Proxy remote images through this server to avoid browser-side cross-origin failures."""
-    if not request_has_valid_auth_or_share():
-        return jsonify({'error': 'Unauthorized'}), 401
+@app.route('/api/share/remote-image')
+def api_share_remote_image():
+    from urllib.parse import unquote
+    from urllib.request import Request, build_opener
+    from flask import Response
+    from reader.constants import REMOTE_IMAGE_MAX_BYTES, REMOTE_IMAGE_TIMEOUT_SECONDS
+    from reader.security import SafeRedirectHandler, is_public_remote_url
 
-    remote_url = request.args.get('url', '')
-    if not remote_url:
-        return jsonify({'error': '缺少图片 URL'}), 400
+    share_token = request.args.get('share_token', '')
+    link = find_share_link(share_token)
+    if not is_share_link_active(link, enforce_view_limit=False):
+        return error_response('unauthorized', '无效或过期的分享令牌', 401)
 
-    remote_url = unquote(remote_url)
-    if not is_public_remote_url(remote_url):
-        return jsonify({'error': '不允许代理该 URL'}), 400
+    remote_url = unquote(request.args.get('url', ''))
+    if not remote_url or not is_public_remote_url(remote_url):
+        return error_response('invalid_url', '不允许代理该 URL', 400)
 
-    req = Request(
-        remote_url,
-        headers={
-            'User-Agent': 'Mozilla/5.0 DocReader/1.0',
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
-        }
-    )
-
+    req = Request(remote_url, headers={'User-Agent': 'Mozilla/5.0 DocReader/2.0', 'Accept': 'image/*'})
     try:
         opener = build_opener(SafeRedirectHandler)
         with opener.open(req, timeout=REMOTE_IMAGE_TIMEOUT_SECONDS) as remote:
             content_type = remote.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
             if not content_type.startswith('image/'):
-                return jsonify({'error': '远程资源不是图片'}), 415
-
+                return error_response('unsupported_type', '远程资源不是图片', 415)
             data = remote.read(REMOTE_IMAGE_MAX_BYTES + 1)
             if len(data) > REMOTE_IMAGE_MAX_BYTES:
-                return jsonify({'error': '远程图片过大'}), 413
-
+                return error_response('payload_too_large', '远程图片过大', 413)
         response = Response(data, mimetype=content_type)
-        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Cache-Control'] = 'no-store'
         return response
     except Exception:
-        return jsonify({'error': '远程图片加载失败'}), 502
+        return error_response('proxy_failed', '远程图片加载失败', 502)
+
+
+@app.errorhandler(ApiError)
+def handle_api_error(exc: ApiError):
+    body = {'error': {'code': exc.code, 'message': exc.message}}
+    body.update(exc.extra)
+    return jsonify(body), exc.status
+
 
 if __name__ == '__main__':
     server_config = config.get('server', {})
     app.run(
         host=server_config.get('host', '0.0.0.0'),
         port=server_config.get('port', 63518),
-        debug=server_config.get('debug', False)
+        debug=server_config.get('debug', False),
     )

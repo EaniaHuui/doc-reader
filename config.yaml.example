@@ -14,6 +14,10 @@ server:
   host: 127.0.0.1    # 监听地址，0.0.0.0 表示所有网卡
   port: 5000         # 监听端口
   debug: false       # 调试模式
+  # 对外分享链接的根地址（含协议与端口）。非 80/443 反代时务必填写，
+  # 否则 nginx 若用 $host 会丢掉端口，生成 http://ip/share/... 而无法访问。
+  # 例: http://115.190.123.77:63518
+  # public_base_url: http://docs.example.com
 
 # 认证配置
 auth:

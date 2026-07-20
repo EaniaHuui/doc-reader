@@ -8,14 +8,18 @@ import logging
 import re
 import secrets
 import time
+import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
 import jwt
-from flask import jsonify, request
+from flask import g, request
 
 from .constants import LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SECONDS, PBKDF2_ITERATIONS, WEAK_JWT_SECRETS
+from .db import db_cursor, init_db
+from .errors import ApiError
 from .storage import get_config
+from .timeutil import to_iso, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +88,11 @@ def get_users() -> dict:
         password = user.get('password')
         is_hashed = user.get('hashed', False)
         if username and password:
-            users[username] = password if is_hashed else hash_password(password)
+            users[username] = {
+                'password': password if is_hashed else hash_password(password),
+                'id': user.get('id') or f'user_{username}',
+                'name': user.get('name') or username,
+            }
     return users
 
 
@@ -97,26 +105,123 @@ def _jwt_secret() -> str:
     return secret
 
 
-def generate_token(username: str) -> str:
-    auth_config = get_auth_config()
+def token_expiration_hours() -> int:
+    return int(get_auth_config().get('token_expiration_hours', 24))
+
+
+def generate_token(username: str) -> tuple[str, str, datetime]:
+    """Return (access_token, jti, expires_at_utc_naive)."""
     secret = _jwt_secret()
-    expiration_hours = auth_config.get('token_expiration_hours', 24)
+    hours = token_expiration_hours()
+    now = datetime.utcnow()
+    expires = now + timedelta(hours=hours)
+    jti = uuid.uuid4().hex
+    users = get_users()
+    user = users.get(username) or {'id': f'user_{username}', 'name': username}
     payload = {
+        'sub': user.get('id') or f'user_{username}',
         'username': username,
-        'exp': datetime.utcnow() + timedelta(hours=expiration_hours),
-        'iat': datetime.utcnow(),
+        'name': user.get('name') or username,
+        'exp': expires,
+        'iat': now,
+        'jti': jti,
     }
-    return jwt.encode(payload, secret, algorithm='HS256')
+    token = jwt.encode(payload, secret, algorithm='HS256')
+    return token, jti, expires
 
 
 def decode_token(token: str):
     secret = _jwt_secret()
     try:
-        return jwt.decode(token, secret, algorithms=['HS256'])
+        payload = jwt.decode(token, secret, algorithms=['HS256'])
     except jwt.ExpiredSignatureError:
         return None
     except jwt.InvalidTokenError:
         return None
+
+    jti = payload.get('jti')
+    if jti and is_token_revoked(jti):
+        return None
+    return payload
+
+
+def is_token_revoked(jti: str) -> bool:
+    init_db()
+    with db_cursor() as cur:
+        row = cur.execute(
+            'SELECT 1 FROM revoked_tokens WHERE jti = ?', (jti,)
+        ).fetchone()
+        return row is not None
+
+
+def revoke_token(jti: str, expires_at: datetime | None = None) -> None:
+    if not jti:
+        return
+    init_db()
+    with db_cursor(commit=True) as cur:
+        cur.execute(
+            'INSERT OR IGNORE INTO revoked_tokens(jti, revoked_at, expires_at) VALUES(?, ?, ?)',
+            (jti, to_iso(), to_iso(expires_at or (utc_now() + timedelta(days=30)))),
+        )
+
+
+def extract_auth_token() -> str | None:
+    """Read JWT from Authorization header, cookie, or query string."""
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header[7:].strip()
+        if token:
+            return token
+
+    cookie_token = (request.cookies.get('authToken') or '').strip()
+    if cookie_token:
+        return cookie_token
+
+    query_token = (request.args.get('token') or '').strip()
+    if query_token:
+        return query_token
+
+    return None
+
+
+def get_auth_payload():
+    """Return decoded JWT payload when the request is authenticated."""
+    if not is_auth_enabled():
+        return {
+            'username': 'local',
+            'sub': 'user_local',
+            'name': 'local',
+            'jti': None,
+        }
+
+    token = extract_auth_token()
+    if not token:
+        return None
+    return decode_token(token)
+
+
+def current_user_dict(payload=None) -> dict:
+    payload = payload or get_auth_payload() or {}
+    username = payload.get('username') or 'local'
+    return {
+        'id': payload.get('sub') or f'user_{username}',
+        'name': payload.get('name') or username,
+        'username': username,
+    }
+
+
+def issue_login_response(username: str) -> dict:
+    token, jti, expires = generate_token(username)
+    users = get_users()
+    user = users.get(username) or {'id': f'user_{username}', 'name': username}
+    return {
+        'access_token': token,
+        'expires_at': to_iso(expires),
+        'user': {
+            'id': user.get('id') or f'user_{username}',
+            'name': user.get('name') or username,
+        },
+    }
 
 
 def is_login_rate_limited(client_ip: str) -> bool:
@@ -142,23 +247,22 @@ def clear_login_failures(client_ip: str) -> None:
 
 
 def login_required(f):
-    """Decorator to require authentication for routes."""
+    """Decorator to require authentication for routes (structured errors)."""
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not is_auth_enabled():
+            g.user = current_user_dict()
+            request.user = g.user
             return f(*args, **kwargs)
 
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Unauthorized'}), 401
-
-        token = auth_header.split(' ')[1]
-        payload = decode_token(token)
+        payload = get_auth_payload()
         if payload is None:
-            return jsonify({'error': 'Invalid or expired token'}), 401
+            raise ApiError('unauthorized', '未认证或令牌已过期', 401)
 
-        request.user = payload
+        g.user = current_user_dict(payload)
+        g.auth_payload = payload
+        request.user = g.user
         return f(*args, **kwargs)
 
     return decorated_function

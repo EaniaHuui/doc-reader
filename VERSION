@@ -1,12 +1,23 @@
 MARKDOWN READER
 ===============
 
-Version: 1.1.41
-Build: 41
-Last Updated: 2026-03-05
+Version: 2.0.0
+Build: 50
+Last Updated: 2026-07-20
 
 CHANGELOG
 =========
+
+[2.0.0] - 2026-07-20
+--------------------
+- Replace ad-hoc API with /api/v1 contract (root_id + root-relative paths)
+- SQLite FTS index, pins, recent, pairing sessions, trash metadata
+- Soft-delete to trash (30-day recovery) instead of immediate unlink
+- Optimistic concurrency via document revision (if_match_revision)
+- Mobile pairing QR (60s one-time exchange)
+- Desktop Web client updated to /api/v1 only; pairing UI
+- Cache-Control: no-store on document and asset responses
+- See docs/API_V1.md and docs/MIGRATION_V1.md
 
 [1.1.41] - 2026-03-05
 --------------------

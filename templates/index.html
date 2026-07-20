@@ -14,7 +14,7 @@
     <link id="hljs-theme-dark" rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled>
 
     <!-- Styles -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=44">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=50">
 </head>
 <body>
     <div class="app">
@@ -142,6 +142,13 @@
                     </svg>
                     <span class="auth-label">登录</span>
                     <span class="auth-username"></span>
+                </button>
+                <button class="sidebar-footer-btn" id="pairingBtn" title="手机配对">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="5" y="2" width="14" height="20" rx="2"/>
+                        <line x1="12" y1="18" x2="12.01" y2="18"/>
+                    </svg>
+                    <span>配对</span>
                 </button>
                 <button class="sidebar-footer-btn" id="themeToggle" title="切换主题">
                     <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -772,10 +779,11 @@
     <script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
     <!-- App scripts (order matters). auth/share after main so el/state exist at call time. -->
-    <script src="{{ url_for('static', filename='js/utils.js') }}?v=44"></script>
-    <script src="{{ url_for('static', filename='js/theme.js') }}?v=44"></script>
-    <script src="{{ url_for('static', filename='script.js') }}?v=44"></script>
-    <script src="{{ url_for('static', filename='js/auth.js') }}?v=44"></script>
-    <script src="{{ url_for('static', filename='js/share.js') }}?v=44"></script>
+    <script src="{{ url_for('static', filename='js/utils.js') }}?v=50"></script>
+    <script src="{{ url_for('static', filename='js/theme.js') }}?v=50"></script>
+    <script src="{{ url_for('static', filename='script.js') }}?v=50"></script>
+    <script src="{{ url_for('static', filename='js/auth.js') }}?v=50"></script>
+    <script src="{{ url_for('static', filename='js/share.js') }}?v=50"></script>
+    <script src="{{ url_for('static', filename='js/pairing.js') }}?v=50"></script>
 </body>
 </html>

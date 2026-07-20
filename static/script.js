@@ -4,8 +4,23 @@
  */
 
 // State
-let currentPath = null;
+let currentPath = null;          // root-relative path
+let currentRootId = null;        // opaque root id
+let currentRevision = null;      // opaque revision for optimistic concurrency
+let currentDocType = null;
+let rootsById = {};              // root_id -> {root_id, name, path}
 let currentRawContent = null;  // Store raw markdown content
+const API_V1 = '/api/v1';
+
+function treeKey(rootId, relPath) {
+    return `${rootId || ''}::${relPath || ''}`;
+}
+
+function parseTreeKey(key) {
+    if (!key || !key.includes('::')) return { rootId: null, path: key || '' };
+    const idx = key.indexOf('::');
+    return { rootId: key.slice(0, idx), path: key.slice(idx + 2) };
+}
 let searchTimeout = null;
 let isSearchOpen = false;
 let sidebarCollapsed = false;
@@ -181,13 +196,18 @@ document.addEventListener('DOMContentLoaded', () => {
     initFileFilters();
     initShortcutHints();
     checkAuthStatus().then(() => {
-        loadDirectories();
-        // Check URL for file parameter
-        const urlParams = new URLSearchParams(window.location.search);
-        const fileParam = urlParams.get('file');
-        if (fileParam) {
-            loadFile(decodeURIComponent(fileParam));
-        }
+        loadDirectories().then(() => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const rootId = urlParams.get('root_id');
+            const pathParam = urlParams.get('path');
+            const fileParam = urlParams.get('file');
+            if (rootId && pathParam) {
+                loadFile(rootId, decodeURIComponent(pathParam));
+            } else if (fileParam) {
+                // Legacy deep link: unsupported without root — show welcome
+                console.warn('Legacy ?file= deep link is deprecated; use root_id+path');
+            }
+        });
     });
     setupEventListeners();
     initTheme();
@@ -213,6 +233,22 @@ function setupEventListeners() {
         }
     });
     el.loginForm.addEventListener('submit', handleLogin);
+
+    // Mobile pairing (optional button; also exposed on auth button context)
+    const pairingBtn = document.getElementById('pairingBtn');
+    if (pairingBtn) {
+        pairingBtn.addEventListener('click', openPairingModal);
+    }
+    // Double-click username opens pairing when authenticated
+    if (el.authBtn) {
+        el.authBtn.addEventListener('dblclick', (e) => {
+            if (authToken) {
+                e.preventDefault();
+                openPairingModal();
+            }
+        });
+    }
+
 
     // Home button
     el.workspaceHome.addEventListener('click', goHome);
@@ -409,13 +445,50 @@ function handleKeyboard(e) {
 
 let directoryTreeData = [];
 
-function buildDirectoryRequestUrl(path = null) {
-    const params = new URLSearchParams();
-    if (showTxtFiles) params.append('txt', 'true');
-    if (showJsonFiles) params.append('json', 'true');
-    if (!showImageFiles) params.append('images', 'false');
+function buildTreeUrl(rootId, path = null) {
+    const params = new URLSearchParams({ root_id: rootId });
     if (path) params.append('path', path);
-    return `/api/directories${params.toString() ? '?' + params.toString() : ''}`;
+    return `${API_V1}/tree?${params.toString()}`;
+}
+
+function filterTreeEntries(entries) {
+    return (entries || []).filter(entry => {
+        if (entry.kind === 'directory' || entry.type === 'directory') return true;
+        const t = entry.type;
+        if (t === 'markdown') return true;
+        if (t === 'txt') return showTxtFiles;
+        if (t === 'json') return showJsonFiles;
+        if (t === 'image') return showImageFiles;
+        return false;
+    }).map(entry => {
+        const kind = entry.kind || entry.type;
+        if (kind === 'directory') {
+            return {
+                name: entry.name,
+                path: entry.path,
+                root_id: entry.root_id,
+                type: 'directory',
+                kind: 'directory',
+                children: [],
+                children_loaded: false,
+                has_children: true,
+                is_empty: false,
+                modified_at: entry.modified_at,
+            };
+        }
+        const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop().toLowerCase() : '';
+        return {
+            name: entry.name,
+            path: entry.path,
+            root_id: entry.root_id,
+            type: 'file',
+            kind: 'file',
+            docType: entry.type,
+            ext,
+            modified_at: entry.modified_at,
+            size_bytes: entry.size_bytes,
+        };
+    });
 }
 
 function shouldShowDirectoryNode(node) {
@@ -435,7 +508,12 @@ function getVisibleTreeNodes(nodes) {
 function collectDirectoryOptions(nodes, result = []) {
     nodes.forEach(node => {
         if (node?.type !== 'directory') return;
-        result.push({ path: node.path, name: node.name });
+        result.push({
+            path: node.path,
+            name: node.name,
+            root_id: node.root_id,
+            treeKey: node.treeKey || treeKey(node.root_id, node.path),
+        });
         if (Array.isArray(node.children) && node.children.length > 0) {
             collectDirectoryOptions(node.children, result);
         }
@@ -443,9 +521,10 @@ function collectDirectoryOptions(nodes, result = []) {
     return result;
 }
 
-function findNodeByPath(path, nodes = directoryTreeData) {
+function findNodeByPath(pathOrKey, nodes = directoryTreeData) {
     for (const node of nodes) {
-        if (node?.path === path) {
+        const key = node.treeKey || treeKey(node.root_id, node.path);
+        if (node?.path === pathOrKey || key === pathOrKey) {
             return node;
         }
         if (node?.type === 'directory' && Array.isArray(node.children) && node.children.length > 0) {
@@ -469,23 +548,28 @@ function ensureDefaultExpandedRoots() {
     }
     directoryTreeData.forEach(node => {
         if (node?.type === 'directory') {
-            expandedPaths.add(node.path);
+            expandedPaths.add(node.treeKey || treeKey(node.root_id, node.path));
         }
     });
     persistExpandedPaths(expandedPaths);
 }
 
-async function fetchDirectoryChildren(path) {
-    const response = await authFetch(buildDirectoryRequestUrl(path));
+async function fetchDirectoryChildren(rootId, relPath) {
+    const response = await authFetch(buildTreeUrl(rootId, relPath || null));
     const data = await response.json();
     if (!response.ok) {
-        throw new Error(data.error || '加载目录失败');
+        throw new Error(apiErrorMessage(data, '加载目录失败'));
     }
-    return Array.isArray(data) ? data : [];
+    const entries = filterTreeEntries(data.entries || []);
+    return entries.map(entry => ({
+        ...entry,
+        root_id: rootId,
+        treeKey: treeKey(rootId, entry.path),
+    }));
 }
 
-async function ensureDirectoryLoaded(path) {
-    const node = findNodeByPath(path);
+async function ensureDirectoryLoaded(nodeOrKey) {
+    let node = typeof nodeOrKey === 'object' ? nodeOrKey : findNodeByPath(nodeOrKey);
     if (!node || node.type !== 'directory') {
         return null;
     }
@@ -493,7 +577,7 @@ async function ensureDirectoryLoaded(path) {
         return node;
     }
 
-    const children = await fetchDirectoryChildren(path);
+    const children = await fetchDirectoryChildren(node.root_id, node.path || '');
     node.children = children;
     node.children_loaded = true;
     node.has_children = children.length > 0;
@@ -536,9 +620,12 @@ async function restoreExpandedDirectories() {
     }
 }
 
-function findTreeItemElement(path) {
+function findTreeItemElement(pathOrKey) {
     if (!el.treeItems) return null;
-    const row = el.treeItems.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
+    let row = el.treeItems.querySelector(`.tree-row[data-key="${CSS.escape(pathOrKey)}"]`);
+    if (!row) {
+        row = el.treeItems.querySelector(`.tree-row[data-path="${CSS.escape(pathOrKey)}"]`);
+    }
     return row ? row.closest('.tree-item') : null;
 }
 
@@ -596,8 +683,8 @@ function expandDirectoryItem(item, node, level, expandedPaths = getExpandedPaths
         !(node.has_children || getVisibleTreeNodes(node.children || []).length > 0)
     );
 
-    if (!expandedPaths.has(node.path)) {
-        expandedPaths.add(node.path);
+    if (!expandedPaths.has(node.treeKey || treeKey(node.root_id, node.path))) {
+        expandedPaths.add(node.treeKey || treeKey(node.root_id, node.path));
         persistExpandedPaths(expandedPaths);
     }
 }
@@ -646,13 +733,29 @@ function renderDirectoryTree() {
 
 async function loadDirectories() {
     try {
-        const response = await authFetch(buildDirectoryRequestUrl());
-        const directories = await response.json();
+        const response = await authFetch(`${API_V1}/bootstrap`);
+        const data = await response.json();
         if (!response.ok) {
-            throw new Error(directories.error || '加载目录列表失败');
+            throw new Error(apiErrorMessage(data, '加载目录列表失败'));
         }
 
-        directoryTreeData = Array.isArray(directories) ? directories : [];
+        const roots = Array.isArray(data.roots) ? data.roots : [];
+        rootsById = {};
+        roots.forEach(r => { rootsById[r.root_id] = r; });
+
+        directoryTreeData = roots.map(root => ({
+            name: root.name,
+            path: '',
+            root_id: root.root_id,
+            treeKey: treeKey(root.root_id, ''),
+            type: 'directory',
+            kind: 'directory',
+            children: [],
+            children_loaded: false,
+            has_children: true,
+            is_empty: false,
+            is_root: true,
+        }));
         ensureDefaultExpandedRoots();
         await restoreExpandedDirectories();
         renderDirectoryTree();
@@ -679,15 +782,16 @@ async function toggleDirectoryNode(node) {
         return;
     }
 
+    const key = node.treeKey || treeKey(node.root_id, node.path);
     const expandedPaths = getExpandedPaths();
-    const isExpanded = expandedPaths.has(node.path);
-    const item = findTreeItemElement(node.path);
+    const isExpanded = expandedPaths.has(key);
+    const item = findTreeItemElement(key);
 
     if (isExpanded) {
         if (item) {
-            collapseDirectoryItem(item, node.path, expandedPaths);
+            collapseDirectoryItem(item, key, expandedPaths);
         } else {
-            expandedPaths.delete(node.path);
+            expandedPaths.delete(key);
             persistExpandedPaths(expandedPaths);
             renderDirectoryTree();
         }
@@ -700,9 +804,9 @@ async function toggleDirectoryNode(node) {
             item.classList.add('loading');
         }
         try {
-            await ensureDirectoryLoaded(node.path);
+            await ensureDirectoryLoaded(node);
         } catch (error) {
-            console.error(`Failed to expand directory ${node.path}:`, error);
+            console.error(`Failed to expand directory ${key}:`, error);
             showToast(error.message || '加载目录失败');
             return;
         } finally {
@@ -715,7 +819,7 @@ async function toggleDirectoryNode(node) {
     if (item) {
         expandDirectoryItem(item, node, getTreeNodeLevel(item), expandedPaths);
     } else {
-        expandedPaths.add(node.path);
+        expandedPaths.add(key);
         persistExpandedPaths(expandedPaths);
         renderDirectoryTree();
     }
@@ -785,10 +889,11 @@ function ensureTreeActionButtons(row) {
         return actionButtons;
     }
 
-    const path = row.dataset.path;
+    const path = row.dataset.path || '';
+    const key = row.dataset.key || treeKey(row.dataset.rootId, path);
     const nodeType = row.dataset.type;
     const nodeName = row.dataset.name || '';
-    if (!path || !nodeType) {
+    if (!nodeType || !row.dataset.rootId) {
         return null;
     }
 
@@ -804,7 +909,7 @@ function ensureTreeActionButtons(row) {
     copyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         e.preventDefault();
-        copyTreePath(path);
+        copyTreePath(path || key);
     });
     actionButtons.appendChild(copyBtn);
 
@@ -816,7 +921,7 @@ function ensureTreeActionButtons(row) {
     moveBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         e.preventDefault();
-        openMoveItemModal(path, nodeName, nodeType);
+        openMoveItemModal(key, nodeName, nodeType);
     });
     actionButtons.appendChild(moveBtn);
 
@@ -841,7 +946,7 @@ function ensureTreeActionButtons(row) {
             e.stopPropagation();
             e.preventDefault();
             hideAllDropdowns();
-            openCreateFileModal(path);
+            openCreateFileModal(key);
         });
 
         const newDirOption = document.createElement('div');
@@ -854,7 +959,7 @@ function ensureTreeActionButtons(row) {
             e.stopPropagation();
             e.preventDefault();
             hideAllDropdowns();
-            openCreateDirModal(path);
+            openCreateDirModal(key);
         });
 
         dropdown.appendChild(newFileOption);
@@ -886,7 +991,7 @@ function ensureTreeActionButtons(row) {
         deleteBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             e.preventDefault();
-            openDeleteDirConfirm(path, nodeName);
+            openDeleteDirConfirm(key, nodeName);
         });
         actionButtons.appendChild(deleteBtn);
     }
@@ -900,7 +1005,7 @@ function renderTree(node, level, expandedPaths = getExpandedPaths()) {
     item.className = 'tree-item';
 
     const isDirectory = node.type === 'directory';
-    const isExpanded = isDirectory && expandedPaths.has(node.path);
+    const isExpanded = isDirectory && expandedPaths.has(node.treeKey || treeKey(node.root_id, node.path));
     const hasRenderedChildren = isDirectory
         && Array.isArray(node.children)
         && getVisibleTreeNodes(node.children).length > 0;
@@ -912,6 +1017,8 @@ function renderTree(node, level, expandedPaths = getExpandedPaths()) {
     const row = document.createElement('div');
     row.className = 'tree-row';
     row.dataset.path = node.path;
+    row.dataset.rootId = node.root_id || '';
+    row.dataset.key = node.treeKey || treeKey(node.root_id, node.path);
     row.dataset.type = node.type;
     row.dataset.name = node.name;
 
@@ -965,7 +1072,7 @@ function renderTree(node, level, expandedPaths = getExpandedPaths()) {
         row.addEventListener('click', handleToggle);
     } else {
         row.addEventListener('click', () => {
-            loadFile(node.path, node.name);
+            loadFile(node.root_id, node.path, node.name);
             setActiveRow(row);
 
             if (window.innerWidth <= 768) {
@@ -995,8 +1102,24 @@ function setActiveRow(row) {
 // File Loading
 // ========================================
 
-async function loadFile(filePath, fileName) {
+async function loadFile(rootIdOrPath, pathOrName, maybeName) {
     try {
+        // Support loadFile(rootId, path, name?) and legacy loadFile(path)
+        let rootId = rootIdOrPath;
+        let filePath = pathOrName;
+        let fileName = maybeName;
+        if (pathOrName === undefined || (typeof pathOrName === 'string' && !rootsById[rootIdOrPath] && !rootIdOrPath.startsWith('root_'))) {
+            // ambiguous legacy: try treat as path only if root known
+            filePath = rootIdOrPath;
+            fileName = pathOrName;
+            rootId = currentRootId;
+        }
+        if (!rootId) {
+            showError('缺少文档根');
+            return false;
+        }
+
+        currentRootId = rootId;
         currentPath = filePath;
 
         // On mobile, close the drawer after picking a page so content is readable.
@@ -1004,18 +1127,85 @@ async function loadFile(filePath, fileName) {
             closeMobileSidebar();
         }
 
-        const response = await authFetch(`/api/file?path=${encodeURIComponent(filePath)}`);
-        const data = await response.json();
+        const docTypeHint = filePath && filePath.includes('.') ? filePath.split('.').pop().toLowerCase() : '';
+        const isImageExt = isImageExtension(docTypeHint);
 
-        if (data.error) {
-            showError(data.error);
-            return false;
+        let data;
+        let isImageFile = isImageExt;
+
+        if (isImageFile) {
+            const summaryName = fileName || filePath.split('/').pop();
+            data = {
+                title: summaryName,
+                path: filePath,
+                modified: '',
+                content: `<div class="image-file-viewer"><img src="${assetUrl(rootId, filePath)}" alt="${escapeHtml(summaryName)}"></div>`,
+                raw: null,
+                fileType: 'image',
+                revision: null,
+                type: 'image',
+            };
+            currentRawContent = null;
+            currentRevision = null;
+            currentDocType = 'image';
+        } else {
+            const qs = new URLSearchParams({ root_id: rootId, path: filePath });
+            const response = await authFetch(`${API_V1}/documents?${qs}`);
+            const payload = await response.json();
+            if (!response.ok) {
+                showError(apiErrorMessage(payload, '加载文件失败'));
+                return false;
+            }
+            const doc = payload.document || payload;
+            currentRawContent = doc.raw_content ?? null;
+            currentRevision = doc.revision || null;
+            currentDocType = doc.type || 'markdown';
+
+            // Render HTML for reading view
+            let htmlContent = '';
+            if (currentDocType === 'markdown' || currentDocType === 'md') {
+                const rr = await authFetch(`${API_V1}/render`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: currentRawContent || '', path: filePath }),
+                });
+                const rd = await rr.json();
+                htmlContent = rr.ok ? (rd.content || '') : `<pre>${escapeHtml(currentRawContent || '')}</pre>`;
+            } else if (currentDocType === 'json') {
+                const rr = await authFetch(`${API_V1}/render`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: currentRawContent || '', path: filePath }),
+                });
+                const rd = await rr.json();
+                htmlContent = rr.ok ? (rd.content || '') : `<pre>${escapeHtml(currentRawContent || '')}</pre>`;
+            } else {
+                const rr = await authFetch(`${API_V1}/render`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: currentRawContent || '', path: filePath }),
+                });
+                const rd = await rr.json();
+                htmlContent = rr.ok ? (rd.content || '') : `<pre>${escapeHtml(currentRawContent || '')}</pre>`;
+            }
+
+            data = {
+                title: doc.title || fileName || filePath.split('/').pop(),
+                path: doc.path || filePath,
+                modified: (doc.modified_at || '').replace('T', ' ').replace('Z', ''),
+                content: htmlContent,
+                raw: currentRawContent,
+                revision: currentRevision,
+                type: currentDocType,
+            };
+
+            // Record recent
+            authFetch(`${API_V1}/documents/opened`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ root_id: rootId, path: filePath }),
+            }).catch(() => {});
         }
-
-        const isImageFile = data.fileType === 'image';
-
-        // Store raw content for source view
-        currentRawContent = data.raw ?? null;
 
         // Restore source view mode from localStorage
         const savedViewMode = isImageFile ? 'normal' : (localStorage.getItem('sourceViewMode') || 'normal');
@@ -1048,7 +1238,7 @@ async function loadFile(filePath, fileName) {
         el.shareBtn.disabled = false;
 
         el.docTitle.textContent = data.title;
-        el.docPath.textContent = simplifyPath(data.path);
+        el.docPath.textContent = displayDocPath((rootsById[rootId] && rootsById[rootId].name) || '', data.path || filePath);
         el.docTime.textContent = data.modified || '';
         el.docContent.innerHTML = data.content;
 
@@ -1071,11 +1261,10 @@ async function loadFile(filePath, fileName) {
                 const originalSrc = img.getAttribute('src');
                 if (isHttpUrl(originalSrc)) {
                     img.src = remoteImageProxyUrl(originalSrc);
-                } else if (originalSrc && !originalSrc.startsWith('data:')) {
-                    const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
-                    const absolutePath = fileDir + '/' + originalSrc;
-                    const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
-                    img.src = '/api/image?path=' + encodeURIComponent(absolutePath) + tokenParam;
+                } else if (originalSrc && !originalSrc.startsWith('data:') && !originalSrc.startsWith('/api/')) {
+                    const fileDir = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+                    const rel = joinRootRelative(fileDir, originalSrc);
+                    img.src = assetUrl(rootId, rel);
                 }
             });
         };
@@ -1088,11 +1277,11 @@ async function loadFile(filePath, fileName) {
                     link.target = '_blank';
                     link.rel = 'noopener noreferrer';
                 } else if (href && !href.startsWith('#') && !href.startsWith('mailto:')) {
-                    const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
-                    const absolutePath = resolveRelativePath(fileDir, href);
+                    const fileDir = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+                    const rel = joinRootRelative(fileDir, href);
                     link.addEventListener('click', (e) => {
                         e.preventDefault();
-                        loadFile(absolutePath);
+                        loadFile(rootId, rel);
                     });
                 }
             });
@@ -1432,7 +1621,9 @@ async function loadFile(filePath, fileName) {
 
         // Update URL without reloading
         const newUrl = new URL(window.location);
-        newUrl.searchParams.set('file', filePath);
+        newUrl.searchParams.delete('file');
+        newUrl.searchParams.set('root_id', rootId);
+        newUrl.searchParams.set('path', filePath);
         window.history.replaceState({}, '', newUrl);
 
         // Scroll to top (callers that need in-doc jump will scroll to the hit after this)
@@ -1603,12 +1794,12 @@ async function performSearch(query) {
     `;
 
     try {
-        const response = await authFetch(`/api/search?q=${encodeURIComponent(query)}`);
-        let results = null;
+        const response = await authFetch(`${API_V1}/search?q=${encodeURIComponent(query)}`);
+        let payload = null;
         try {
-            results = await response.json();
+            payload = await response.json();
         } catch (_) {
-            results = null;
+            payload = null;
         }
 
         if (response.status === 401) {
@@ -1619,14 +1810,15 @@ async function performSearch(query) {
         }
 
         if (!response.ok) {
-            const msg = (results && results.error) ? results.error : `搜索失败 (${response.status})`;
+            const msg = apiErrorMessage(payload, `搜索失败 (${response.status})`);
             el.searchResults.innerHTML = `
                 <div class="search-placeholder">${escapeHtml(String(msg))}</div>
             `;
             return;
         }
 
-        if (!Array.isArray(results)) {
+        const results = (payload && Array.isArray(payload.results)) ? payload.results : null;
+        if (!results) {
             el.searchResults.innerHTML = `
                 <div class="search-placeholder">搜索返回格式异常</div>
             `;
@@ -1655,14 +1847,16 @@ function displaySearchResults(results, query = '') {
     }
 
     el.searchResults.innerHTML = results.map((result) => {
-        const path = result.path || '';
-        const name = result.name || path.split('/').pop() || '未命名';
-        const dirLabel = result.directory || '';
+        const doc = result.document || result;
+        const path = doc.path || '';
+        const rootId = doc.root_id || '';
+        const name = doc.title || path.split('/').pop() || '未命名';
+        const dirLabel = (rootsById[rootId] && rootsById[rootId].name) || rootId || '';
         const snippet = result.snippet || '';
-        const matchKind = result.match === 'name' ? 'name' : 'content';
-        const matchLabel = matchKind === 'name' ? '文件名' : '正文';
+        const matchKind = result.title_match ? 'name' : 'content';
+        const matchLabel = matchKind === 'name' ? '标题' : '正文';
         return `
-        <div class="search-result" role="option" data-path="${escapeHtml(path)}" data-query="${escapeHtml(query)}" data-match="${matchKind}" tabindex="0">
+        <div class="search-result" role="option" data-path="${escapeHtml(path)}" data-root-id="${escapeHtml(rootId)}" data-query="${escapeHtml(query)}" data-match="${matchKind}" tabindex="0">
             <div class="search-result-icon">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
@@ -1679,11 +1873,12 @@ function displaySearchResults(results, query = '') {
 
     const openResult = async (item) => {
         const path = item.getAttribute('data-path');
+        const rootId = item.getAttribute('data-root-id');
         const q = item.getAttribute('data-query') || '';
         const matchKind = item.getAttribute('data-match') || 'content';
         if (!path) return;
         closeSearch();
-        const ok = await loadFile(path);
+        const ok = await loadFile(rootId, path);
         if (!ok || !q) return;
         await jumpToSearchHitInDocument(q, matchKind);
     };
@@ -1798,7 +1993,7 @@ function refreshCurrentFile() {
 
     // Refresh current file if one is loaded
     if (currentPath) {
-        loadFile(currentPath).then(() => {
+        loadFile(currentRootId, currentPath).then(() => {
             setTimeout(() => {
                 el.refreshBtn.classList.remove('spinning');
             }, 300);
@@ -2009,8 +2204,9 @@ function closeDirConfig() {
 
 async function loadDirectoriesConfig() {
     try {
-        const response = await authFetch('/api/directories/config');
-        directoriesCache = await response.json();
+        const response = await authFetch(`${API_V1}/admin/directories`);
+        const cfg = await response.json();
+        directoriesCache = (cfg && cfg.directories) ? cfg.directories : [];
     } catch (error) {
         console.error('Failed to load directories config:', error);
         directoriesCache = [];
@@ -2074,8 +2270,8 @@ async function saveDirectories() {
         el.dirSaveBtn.disabled = true;
         el.dirSaveBtn.textContent = '保存中...';
 
-        const response = await authFetch('/api/directories/config', {
-            method: 'POST',
+        const response = await authFetch(`${API_V1}/admin/directories`, {
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
             },
@@ -2130,8 +2326,8 @@ async function addDirectory() {
 
         // Check if path is valid by temporarily adding to cache and validating
         const tempDir = { name, path };
-        const testResponse = await authFetch('/api/directories/config', {
-            method: 'POST',
+        const testResponse = await authFetch(`${API_V1}/admin/directories`, {
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
             },
@@ -2441,7 +2637,11 @@ function highlightTreeItem(filePath, options = {}) {
 
     treeItems.forEach(item => {
         const row = item.querySelector('.tree-row');
-        if (row && row.dataset.path === filePath) {
+        if (!row) return;
+        if (row.dataset.key === filePath || row.dataset.path === filePath) {
+            targetRow = row;
+        }
+        if (currentRootId && row.dataset.rootId === currentRootId && row.dataset.path === filePath) {
             targetRow = row;
         }
     });
@@ -2481,19 +2681,23 @@ async function confirmDelete() {
         el.deleteConfirmBtn.disabled = true;
         el.deleteConfirmBtn.textContent = '删除中...';
 
-        const response = await authFetch('/api/file', {
+        const response = await authFetch(`${API_V1}/entries`, {
             method: 'DELETE',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ path: currentPath })
+            body: JSON.stringify({
+                root_id: currentRootId,
+                path: currentPath,
+                if_match_revision: currentRevision || undefined,
+            })
         });
 
         const data = await response.json();
 
         if (response.ok) {
             closeDeleteConfirm();
-            showToast('文件已删除');
+            showToast('文件已移入回收站');
 
             // Clear current path
             const deletedPath = currentPath;
@@ -2571,12 +2775,15 @@ async function confirmDeleteDir() {
         el.deleteDirConfirmBtn.disabled = true;
         el.deleteDirConfirmBtn.textContent = '删除中...';
 
-        const response = await authFetch('/api/directory', {
+        const node = findNodeByPath(deleteDirPath);
+        const rootId = (node && node.root_id) || currentRootId;
+        const relPath = (node && node.path !== undefined) ? node.path : parseTreeKey(deleteDirPath).path;
+        const response = await authFetch(`${API_V1}/entries`, {
             method: 'DELETE',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ path: deleteDirPath })
+            body: JSON.stringify({ root_id: rootId, path: relPath })
         });
 
         const data = await response.json();
@@ -2672,8 +2879,8 @@ function renderMoveTargetOptions() {
 
     options.forEach(option => {
         const element = document.createElement('option');
-        element.value = option.path;
-        element.textContent = `${option.name} · ${simplifyPath(option.path)}`;
+        element.value = option.treeKey || treeKey(option.root_id, option.path);
+        element.textContent = `${option.name} · ${displayDocPath((rootsById[option.root_id]||{}).name || '', option.path)}`;
         if (option.path === currentParent) {
             element.selected = true;
         }
@@ -2715,43 +2922,51 @@ async function confirmMoveItem() {
         el.moveItemConfirmBtn.disabled = true;
         el.moveItemConfirmBtn.textContent = '移动中...';
 
-        const response = await authFetch('/api/move', {
-            method: 'POST',
+        const srcNode = findNodeByPath(moveItemSourcePath);
+        const dstOpt = directoryOptionsCache.find(o => o.treeKey === targetDirectory || o.path === targetDirectory);
+        const rootId = (srcNode && srcNode.root_id) || (dstOpt && dstOpt.root_id) || currentRootId;
+        const fromPath = (srcNode && srcNode.path !== undefined) ? srcNode.path : parseTreeKey(moveItemSourcePath).path;
+        const toDir = (dstOpt && dstOpt.path !== undefined) ? dstOpt.path : parseTreeKey(targetDirectory).path;
+        const toPath = toDir ? `${toDir}/${moveItemName}` : moveItemName;
+        const response = await authFetch(`${API_V1}/entries/move`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                source_path: moveItemSourcePath,
-                target_directory: targetDirectory
+                root_id: rootId,
+                from_path: fromPath,
+                to_path: toPath,
+                if_match_revision: currentRevision || undefined,
             })
         });
 
         const data = await response.json();
 
-        if (!response.ok || !data.success) {
-            el.moveItemError.textContent = data.error || '移动失败';
+        if (!response.ok) {
+            el.moveItemError.textContent = apiErrorMessage(data, '移动失败');
             el.moveItemError.style.display = 'block';
             return;
         }
 
-        const movedFrom = moveItemSourcePath;
-        const movedTo = data.destination_path;
-        const wasCurrentFile = currentPath && currentPath === movedFrom;
-        const currentFileInsideMovedDir = moveItemType === 'directory' && currentPath && currentPath.startsWith(`${movedFrom}/`);
+        const movedFrom = fromPath;
+        const movedTo = data.to_path || toPath;
+        const wasCurrentFile = currentPath && currentRootId === rootId && currentPath === movedFrom;
+        const currentFileInsideMovedDir = moveItemType === 'directory' && currentRootId === rootId && currentPath && currentPath.startsWith(`${movedFrom}/`);
 
         const movedType = moveItemType;
         closeMoveItemModal();
         saveExpandedState();
         const expandedPaths = getExpandedPaths();
-        expandedPaths.add(targetDirectory);
+        expandedPaths.add(treeKey(rootId, toDir));
         persistExpandedPaths(expandedPaths);
         await loadDirectories();
 
         if (wasCurrentFile) {
-            await loadFile(movedTo);
+            await loadFile(rootId, movedTo);
         } else if (currentFileInsideMovedDir) {
             const suffix = currentPath.slice(movedFrom.length);
-            await loadFile(`${movedTo}${suffix}`);
+            await loadFile(rootId, `${movedTo}${suffix}`);
         } else if (currentPath) {
-            highlightTreeItem(currentPath, {scrollIntoView: false});
+            highlightTreeItem(treeKey(currentRootId, currentPath), {scrollIntoView: false});
         }
 
         showToast(movedType === 'directory' ? '目录已移动' : '文件已移动');
@@ -2811,22 +3026,32 @@ async function confirmCreateFile() {
 
     // Build full file path
     const fullFileName = fileName.endsWith('.' + fileType) ? fileName : fileName + '.' + fileType;
-    const filePath = createFileDirPath + '/' + fullFileName;
+    const parentNode = findNodeByPath(createFileDirPath);
+    const rootId = (parentNode && parentNode.root_id) || currentRootId;
+    const parentRel = (parentNode && parentNode.path !== undefined) ? parentNode.path : parseTreeKey(createFileDirPath).path;
+    const filePath = parentRel ? `${parentRel}/${fullFileName}` : fullFileName;
+    const typeMap = { md: 'markdown', txt: 'txt', json: 'json' };
+    const apiType = typeMap[fileType] || 'markdown';
 
     // Disable buttons during creation
     el.createFileConfirmBtn.disabled = true;
     el.createFileConfirmBtn.textContent = '创建中...';
 
     try {
-        const response = await authFetch('/api/file', {
+        const response = await authFetch(`${API_V1}/documents`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: filePath, content: '' })
+            body: JSON.stringify({
+                root_id: rootId,
+                path: filePath,
+                type: apiType,
+                raw_content: apiType === 'json' ? '{}' : '',
+            })
         });
 
         const data = await response.json();
 
-        if (response.ok && data.success) {
+        if (response.ok) {
             showToast('文件已创建');
             closeCreateFileModal();
 
@@ -2834,10 +3059,11 @@ async function confirmCreateFile() {
             await loadDirectories();
 
             // Open the newly created file in edit mode
-            loadFile(data.path, data.name);
+            const createdPath = (data.document && data.document.path) || filePath;
+            loadFile(rootId, createdPath);
             enterEditMode();
         } else {
-            el.createFileError.textContent = data.error || '创建文件失败';
+            el.createFileError.textContent = apiErrorMessage(data, '创建文件失败');
             el.createFileError.style.display = 'block';
         }
     } catch (error) {
@@ -2887,23 +3113,25 @@ async function confirmCreateDir() {
         return;
     }
 
-    // Build full directory path
-    const dirPath = createDirParentPath + '/' + dirName;
+    const parentNode = findNodeByPath(createDirParentPath);
+    const rootId = (parentNode && parentNode.root_id) || currentRootId;
+    const parentRel = (parentNode && parentNode.path !== undefined) ? parentNode.path : parseTreeKey(createDirParentPath).path;
+    const dirPath = parentRel ? `${parentRel}/${dirName}` : dirName;
 
     // Disable buttons during creation
     el.createDirConfirmBtn.disabled = true;
     el.createDirConfirmBtn.textContent = '创建中...';
 
     try {
-        const response = await authFetch('/api/directory', {
+        const response = await authFetch(`${API_V1}/directories`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: dirPath })
+            body: JSON.stringify({ root_id: rootId, path: dirPath })
         });
 
         const data = await response.json();
 
-        if (response.ok && data.success) {
+        if (response.ok) {
             showToast('目录已创建');
             closeCreateDirModal();
 
@@ -3029,7 +3257,7 @@ async function updateEditPreview() {
     const content = el.docEditorSplit.value;
 
     try {
-        const response = await authFetch('/api/render', {
+        const response = await authFetch(`${API_V1}/render`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -3050,11 +3278,9 @@ async function updateEditPreview() {
                 const originalSrc = img.getAttribute('src');
                 if (isHttpUrl(originalSrc)) {
                     img.src = remoteImageProxyUrl(originalSrc);
-                } else if (originalSrc && !originalSrc.startsWith('data:')) {
-                    const fileDir = currentPath.substring(0, currentPath.lastIndexOf('/'));
-                    const absolutePath = fileDir + '/' + originalSrc;
-                    const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
-                    img.src = '/api/image?path=' + encodeURIComponent(absolutePath) + tokenParam;
+                } else if (originalSrc && !originalSrc.startsWith('data:') && !originalSrc.startsWith('/api/')) {
+                    const fileDir = currentPath.includes('/') ? currentPath.substring(0, currentPath.lastIndexOf('/')) : '';
+                    img.src = assetUrl(currentRootId, joinRootRelative(fileDir, originalSrc));
                 }
             });
 
@@ -3077,14 +3303,16 @@ async function saveAndExitEditMode() {
     try {
         el.saveBtn.disabled = true;
 
-        const response = await authFetch('/api/file', {
+        const response = await authFetch(`${API_V1}/documents`, {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
+                root_id: currentRootId,
                 path: currentPath,
-                content: newContent
+                raw_content: newContent,
+                if_match_revision: currentRevision,
             })
         });
 
@@ -3092,14 +3320,37 @@ async function saveAndExitEditMode() {
 
         if (response.ok) {
             showToast('文件已保存');
-
-            // Exit edit mode
+            if (data.document && data.document.revision) {
+                currentRevision = data.document.revision;
+            }
             exitEditMode();
-
-            // Reload file to show updated content
-            await loadFile(currentPath);
+            await loadFile(currentRootId, currentPath);
+        } else if (response.status === 409 && data.document) {
+            const overwrite = confirm('文档已被修改。确定用本地内容覆盖远程版本？');
+            if (overwrite) {
+                const forceResp = await authFetch(`${API_V1}/documents`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        root_id: currentRootId,
+                        path: currentPath,
+                        raw_content: newContent,
+                        force: true,
+                    })
+                });
+                if (forceResp.ok) {
+                    showToast('已强制覆盖保存');
+                    exitEditMode();
+                    await loadFile(currentRootId, currentPath);
+                } else {
+                    const fd = await forceResp.json();
+                    showToast(apiErrorMessage(fd, '保存失败'));
+                }
+            } else {
+                showToast(apiErrorMessage(data, '版本冲突'));
+            }
         } else {
-            showToast(data.error || '保存文件失败');
+            showToast(apiErrorMessage(data, '保存文件失败'));
         }
     } catch (error) {
         console.error('Save failed:', error);

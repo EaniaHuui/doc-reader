@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% if document %}{{ document.title }}{% elif need_auth %}需要登录{% else %}无法打开{% endif %} - Doc Reader</title>
+
+    <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link id="hljs-theme-light" rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github.min.css" disabled>
+    <link id="hljs-theme-dark" rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=45">
+</head>
+<body class="share-page view-page">
+    <main class="share-shell">
+        {% if need_auth %}
+            <section class="share-error" id="viewAuthGate">
+                <h1>正在打开只读页…</h1>
+                <p>若已登录，将自动继续；否则请先登录完整阅读器。</p>
+                <p class="view-fallback">
+                    <a href="{{ full_reader_url }}">打开完整阅读器（含目录）</a>
+                </p>
+            </section>
+            <script>
+                (function () {
+                    var token = null;
+                    try { token = localStorage.getItem('authToken'); } catch (e) {}
+                    if (token) {
+                        // Promote localStorage JWT to a cookie so /view and /api/image can auth.
+                        var maxAge = 60 * 60 * 24 * 30;
+                        document.cookie = 'authToken=' + encodeURIComponent(token)
+                            + '; Path=/; Max-Age=' + maxAge + '; SameSite=Lax';
+                        location.reload();
+                        return;
+                    }
+                    location.replace({{ full_reader_url|tojson }});
+                })();
+            </script>
+        {% elif error %}
+            <section class="share-error">
+                <h1>无法打开文档</h1>
+                <p>{{ error }}</p>
+                {% if full_reader_url %}
+                <p class="view-fallback">
+                    <a href="{{ full_reader_url }}">尝试在完整阅读器中打开</a>
+                </p>
+                {% endif %}
+            </section>
+        {% else %}
+            <header class="view-toolbar">
+                <div class="view-toolbar-meta" title="{{ display_path or '' }}">
+                    {{ display_path or document.title }}
+                </div>
+                <div class="view-toolbar-actions">
+                    {% if full_reader_url %}
+                    <a class="view-toolbar-link" href="{{ full_reader_url }}">完整阅读器</a>
+                    {% endif %}
+                </div>
+            </header>
+            <article class="document share-document">
+                <h1 class="document-title share-title">{{ document.title }}</h1>
+                <div class="document-time">
+                    最后更新：{{ document.modified }}
+                    <span class="share-expires">只读视图</span>
+                </div>
+                <div class="document-content share-content">
+                    {{ document.content | safe }}
+                </div>
+            </article>
+        {% endif %}
+    </main>
+    {% if document and not error and not need_auth %}
+    <script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script>
+        (function () {
+            var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            var lightLink = document.getElementById('hljs-theme-light');
+            var darkLink = document.getElementById('hljs-theme-dark');
+            if (lightLink && darkLink) {
+                lightLink.disabled = dark;
+                darkLink.disabled = !dark;
+            }
+            if (window.hljs) {
+                document.querySelectorAll('pre code').forEach(function (block) {
+                    hljs.highlightElement(block);
+                });
+            }
+        })();
+    </script>
+    {% endif %}
+</body>
+</html>

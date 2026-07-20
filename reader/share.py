@@ -58,10 +58,26 @@ def update_share_links_for_move(source_path, destination_path) -> None:
         save_share_links(links)
 
 
+def get_public_base_url() -> str:
+    """Base URL for externally shared links.
+
+    Prefer ``server.public_base_url`` so links stay correct when nginx
+    strips the non-default port from the Host header (``$host`` vs
+    ``$http_host``), or when the admin opens the app via localhost.
+    """
+    from .storage import get_config
+
+    configured = (get_config().get('server') or {}).get('public_base_url') or ''
+    configured = str(configured).strip().rstrip('/')
+    if configured:
+        return configured
+    return request.host_url.rstrip('/')
+
+
 def public_share_data(link: dict) -> dict:
     result = deepcopy(link)
     result.pop('token', None)
-    result['url'] = request.host_url.rstrip('/') + f'/share/{link["token"]}'
+    result['url'] = get_public_base_url() + f'/share/{link["token"]}'
     result['active'] = is_share_link_active(link)
     return result
 

@@ -1,25 +1,24 @@
 # Doc Reader
 
-一个轻量级文档阅读器，支持 Markdown、TXT、JSON 与手机浏览。
+一个轻量级个人文档服务器：配置文档根，桌面 Web 与移动客户端通过 `/api/v1` 读写 Markdown / TXT / JSON / 图片。
 
-![Version](https://img.shields.io/badge/version-1.1.37-blue)
+![Version](https://img.shields.io/badge/version-2.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
 ## 功能特性
 
-- 📁 **目录树浏览** - 支持多目录管理，可展开/折叠
-- 📖 **Markdown 渲染** - 支持完整的 Markdown 语法
-- 🎨 **代码高亮** - 使用 Highlight.js 实现语法高亮
-- 📱 **响应式设计** - 完美支持桌面和移动设备
-- 🔍 **文档搜索** - 快速全文搜索
-- 🌙 **暗色模式** - 支持亮色/暗色主题切换
-- 🔐 **JWT 认证** - 可选的用户认证系统
-- 🔗 **只读分享链接** - 为单个文档生成可过期、可撤销、可限制访问次数的公开链接
-- 🌐 **远程图片代理** - 外部域名图片可通过服务器代理加载，减少浏览器跨域、防盗链导致的预览失败
-- 🔗 **内部链接** - 支持 Markdown 文档间跳转
-- 📋 **目录导航** - 自动生成文章目录
-- ⌨️ **快捷键** - Cmd+K 搜索，Cmd+\ 切换侧边栏
+- 📁 **多文档根浏览** - 懒加载目录树（`root_id` + 相对路径）
+- 📖 **Markdown / TXT / JSON** - 原文权威，桌面端可渲染阅读
+- 🔍 **SQLite FTS 全文检索** - 增量索引，不另存文档副本
+- 🗑️ **回收站** - 删除进入服务端回收站，30 天可恢复
+- 📌 **置顶与最近打开** - 服务端持久化
+- 📱 **手机配对** - 60 秒一次性二维码，不泄露密码/长期令牌
+- 🔐 **JWT 认证** - Bearer token；生产环境仅 HTTPS
+- 🔗 **只读分享链接** - 桌面端能力（非移动契约）
+- 🌙 **暗色模式** / 响应式桌面 Web
+
+API 说明见 [`docs/API_V1.md`](docs/API_V1.md)，升级说明见 [`docs/MIGRATION_V1.md`](docs/MIGRATION_V1.md)。
 
 ## 截图
 

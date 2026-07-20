@@ -1,16 +1,19 @@
 /**
- * Doc Reader — share links UI (globals: el, currentPath, authFetch, simplifyPath, formatShareTime, ...)
+ * Doc Reader — share links UI (globals: el, currentPath, currentRootId, authFetch, ...)
  */
 // ========================================
 // Share Links
 // ========================================
 
 async function openShareModal() {
-    if (!currentPath) return;
+    if (!currentPath || !currentRootId) return;
 
     el.shareError.style.display = 'none';
     el.shareError.textContent = '';
-    el.shareCurrentFile.textContent = simplifyPath(currentPath);
+    el.shareCurrentFile.textContent = displayDocPath(
+        (rootsById[currentRootId] && rootsById[currentRootId].name) || '',
+        currentPath
+    );
     el.shareModal.classList.add('visible');
     await loadShareLinks();
 }
@@ -20,16 +23,20 @@ function closeShareModal() {
 }
 
 async function loadShareLinks() {
-    if (!currentPath) return;
+    if (!currentPath || !currentRootId) return;
 
     el.shareLinks.innerHTML = '<div class="share-empty">加载中...</div>';
 
     try {
-        const response = await authFetch(`/api/share-links?path=${encodeURIComponent(currentPath)}`);
+        const qs = new URLSearchParams({
+            root_id: currentRootId,
+            path: currentPath,
+        });
+        const response = await authFetch(`/api/share-links?${qs}`);
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || '加载分享链接失败');
+            throw new Error(apiErrorMessage(data, '加载分享链接失败'));
         }
 
         shareLinksCache = data;
@@ -41,13 +48,14 @@ async function loadShareLinks() {
 }
 
 async function createShareLink() {
-    if (!currentPath) return;
+    if (!currentPath || !currentRootId) return;
 
     el.shareError.style.display = 'none';
     el.createShareBtn.disabled = true;
     el.createShareBtn.textContent = '生成中...';
 
     const payload = {
+        root_id: currentRootId,
         path: currentPath,
         expires_in_hours: Number(el.shareExpiry.value),
         max_views: el.shareMaxViews.value ? Number(el.shareMaxViews.value) : null
@@ -64,7 +72,7 @@ async function createShareLink() {
         const data = await response.json();
 
         if (!response.ok) {
-            el.shareError.textContent = data.error || '创建分享链接失败';
+            el.shareError.textContent = apiErrorMessage(data, '创建分享链接失败');
             el.shareError.style.display = 'block';
             return;
         }
@@ -154,7 +162,7 @@ async function revokeShareLink(linkId) {
         const data = await response.json();
 
         if (!response.ok) {
-            showToast(data.error || '撤销分享链接失败');
+            showToast(apiErrorMessage(data, '撤销分享链接失败'));
             return;
         }
 
@@ -166,4 +174,3 @@ async function revokeShareLink(linkId) {
         showToast('撤销分享链接失败');
     }
 }
-
