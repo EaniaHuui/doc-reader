@@ -10,8 +10,6 @@ let currentRevision = null;      // opaque revision for optimistic concurrency
 let currentDocType = null;
 let rootsById = {};              // root_id -> {root_id, name, path}
 let currentRawContent = null;  // Store raw markdown content
-const API_V1 = '/api/v1';
-
 function treeKey(rootId, relPath) {
     return `${rootId || ''}::${relPath || ''}`;
 }
@@ -528,7 +526,7 @@ function findNodeByPath(pathOrKey, nodes = directoryTreeData) {
             return node;
         }
         if (node?.type === 'directory' && Array.isArray(node.children) && node.children.length > 0) {
-            const match = findNodeByPath(path, node.children);
+            const match = findNodeByPath(pathOrKey, node.children);
             if (match) {
                 return match;
             }

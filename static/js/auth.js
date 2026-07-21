@@ -6,8 +6,6 @@
 // Authentication
 // ========================================
 
-const API_V1 = '/api/v1';
-
 function setAuthTokenCookie(token) {
     if (!token) return;
     // 30 days — keeps /view and image requests authenticated without Authorization headers.

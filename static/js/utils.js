@@ -4,6 +4,9 @@
  */
 /* global authToken */
 
+/** Shared API base for desktop client (declared once; used by script/auth/pairing). */
+var API_V1 = '/api/v1';
+
 function isTouchInteractionMode() {
     return window.innerWidth <= 768
         || window.matchMedia('(hover: none), (pointer: coarse)').matches;

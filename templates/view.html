@@ -9,31 +9,134 @@
     <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <link id="hljs-theme-light" rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github.min.css" disabled>
     <link id="hljs-theme-dark" rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=45">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=51">
 </head>
-<body class="share-page view-page">
+<body class="share-page view-page{% if need_auth %} view-need-auth{% endif %}">
     <main class="share-shell">
         {% if need_auth %}
             <section class="share-error" id="viewAuthGate">
-                <h1>正在打开只读页…</h1>
-                <p>若已登录，将自动继续；否则请先登录完整阅读器。</p>
+                <h1>需要登录</h1>
+                <p>此只读页需要登录后才能查看。登录成功后将留在当前页面。</p>
                 <p class="view-fallback">
-                    <a href="{{ full_reader_url }}">打开完整阅读器（含目录）</a>
+                    {% if full_reader_url %}
+                    <a href="{{ full_reader_url }}">改用完整阅读器打开</a>
+                    {% endif %}
                 </p>
             </section>
+
+            <!-- Login modal (same style as main reader) -->
+            <div class="modal visible auth-required" id="loginModal">
+                <div class="modal-backdrop"></div>
+                <div class="modal-content login-modal-content">
+                    <div class="modal-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                            <polyline points="10 17 15 12 10 7"/>
+                            <line x1="15" y1="12" x2="3" y2="12"/>
+                        </svg>
+                        <span>登录 Doc Reader</span>
+                    </div>
+                    <div class="modal-body">
+                        <form id="loginForm" class="login-form">
+                            <div class="form-group">
+                                <label for="loginUsername">用户名</label>
+                                <input type="text" id="loginUsername" name="username" autocomplete="username" required autofocus>
+                            </div>
+                            <div class="form-group">
+                                <label for="loginPassword">密码</label>
+                                <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
+                            </div>
+                            <button type="submit" class="login-btn" id="loginBtn">
+                                <span class="login-text">登录</span>
+                                <span class="login-loading" style="display: none;">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25"/>
+                                        <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+                                            <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
+                                        </path>
+                                    </svg>
+                                    登录中...
+                                </span>
+                            </button>
+                            <div class="login-error" id="loginError" style="display: none;"></div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
             <script>
                 (function () {
-                    var token = null;
-                    try { token = localStorage.getItem('authToken'); } catch (e) {}
-                    if (token) {
-                        // Promote localStorage JWT to a cookie so /view and /api/image can auth.
+                    function setAuthCookie(token) {
+                        if (!token) return;
                         var maxAge = 60 * 60 * 24 * 30;
                         document.cookie = 'authToken=' + encodeURIComponent(token)
                             + '; Path=/; Max-Age=' + maxAge + '; SameSite=Lax';
+                    }
+
+                    // Already logged in on this browser: promote JWT cookie and stay on /view.
+                    var existing = null;
+                    try { existing = localStorage.getItem('authToken'); } catch (e) {}
+                    if (existing) {
+                        setAuthCookie(existing);
                         location.reload();
                         return;
                     }
-                    location.replace({{ full_reader_url|tojson }});
+
+                    var form = document.getElementById('loginForm');
+                    var usernameEl = document.getElementById('loginUsername');
+                    var passwordEl = document.getElementById('loginPassword');
+                    var loginBtn = document.getElementById('loginBtn');
+                    var loginError = document.getElementById('loginError');
+                    var loginText = loginBtn.querySelector('.login-text');
+                    var loginLoading = loginBtn.querySelector('.login-loading');
+
+                    form.addEventListener('submit', function (e) {
+                        e.preventDefault();
+                        loginError.style.display = 'none';
+                        loginBtn.disabled = true;
+                        loginText.style.display = 'none';
+                        loginLoading.style.display = 'flex';
+
+                        fetch('/api/v1/auth/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                username: usernameEl.value,
+                                password: passwordEl.value
+                            })
+                        }).then(function (resp) {
+                            return resp.json().then(function (data) {
+                                return { ok: resp.ok, status: resp.status, data: data };
+                            });
+                        }).then(function (result) {
+                            if (result.ok && result.data.access_token) {
+                                try {
+                                    localStorage.setItem('authToken', result.data.access_token);
+                                } catch (err) {}
+                                setAuthCookie(result.data.access_token);
+                                // Stay on the read-only /view URL
+                                location.reload();
+                                return;
+                            }
+                            var msg = '登录失败';
+                            if (result.data && result.data.error) {
+                                if (typeof result.data.error === 'object') {
+                                    msg = result.data.error.message || msg;
+                                } else {
+                                    msg = result.data.error;
+                                }
+                            }
+                            loginError.textContent = msg;
+                            loginError.style.display = 'block';
+                        }).catch(function () {
+                            loginError.textContent = '登录失败，请重试';
+                            loginError.style.display = 'block';
+                        }).finally(function () {
+                            loginBtn.disabled = false;
+                            loginText.style.display = 'flex';
+                            loginLoading.style.display = 'none';
+                        });
+                    });
                 })();
             </script>
         {% elif error %}
