@@ -19,6 +19,27 @@ function parseTreeKey(key) {
     const idx = key.indexOf('::');
     return { rootId: key.slice(0, idx), path: key.slice(idx + 2) };
 }
+
+/** Depth of a tree path/key for parent-before-child restore order. */
+function treePathDepth(pathOrKey) {
+    const { path } = parseTreeKey(pathOrKey);
+    if (!path) return 0;
+    return path.split('/').filter(Boolean).length;
+}
+
+/** True if childKey is strictly under parentKey (same root). Supports legacy plain paths. */
+function isStrictTreeDescendant(parentKey, childKey) {
+    if (!parentKey || !childKey || parentKey === childKey) return false;
+    const parent = parseTreeKey(parentKey);
+    const child = parseTreeKey(childKey);
+    if (parent.rootId != null && child.rootId != null) {
+        if (parent.rootId !== child.rootId) return false;
+        if (!parent.path) return Boolean(child.path);
+        return child.path.startsWith(parent.path + '/');
+    }
+    // Legacy plain-path keys (pre treeKey format).
+    return String(childKey).startsWith(String(parentKey) + '/');
+}
 let searchTimeout = null;
 let isSearchOpen = false;
 let sidebarCollapsed = false;
@@ -586,13 +607,15 @@ async function ensureDirectoryLoaded(nodeOrKey) {
 
 async function restoreExpandedDirectories() {
     const expandedPaths = Array.from(getExpandedPaths())
-        .sort((a, b) => a.split('/').length - b.split('/').length);
+        .sort((a, b) => treePathDepth(a) - treePathDepth(b));
 
-    // Group by depth so parents finish loading before children are resolved.
-    // Same-depth nodes can still load concurrently.
+    // Group by path depth so parents finish loading before children are resolved.
+    // Must use treePathDepth (path segment count), not key.split('/'):
+    // treeKeys like "rootId::" and "rootId::folder" both have no '/', so a
+    // naive split puts them in the same concurrent batch and child restore fails.
     const byDepth = new Map();
     for (const path of expandedPaths) {
-        const depth = path.split('/').length;
+        const depth = treePathDepth(path);
         if (!byDepth.has(depth)) byDepth.set(depth, []);
         byDepth.get(depth).push(path);
     }
@@ -659,9 +682,10 @@ function collapseDirectoryItem(item, nodePath, expandedPaths = getExpandedPaths(
     }
 
     // Drop nested expanded paths so restore/render stay proportional to visible state.
+    // Use isStrictTreeDescendant: root key "rootId::" does not match children via "rootId::/".
     let changed = expandedPaths.delete(nodePath);
     for (const path of Array.from(expandedPaths)) {
-        if (path.startsWith(nodePath + '/')) {
+        if (isStrictTreeDescendant(nodePath, path)) {
             expandedPaths.delete(path);
             changed = true;
         }
@@ -2534,9 +2558,11 @@ function saveExpandedState() {
     const expandedItems = el.treeItems.querySelectorAll('.tree-item.expanded');
     const paths = [];
     expandedItems.forEach(item => {
-        const row = item.querySelector('.tree-row');
-        if (row?.dataset?.path) {
-            paths.push(row.dataset.path);
+        const row = item.querySelector(':scope > .tree-row');
+        if (row?.dataset?.key) {
+            paths.push(row.dataset.key);
+        } else if (row?.dataset?.rootId != null && row?.dataset?.path !== undefined) {
+            paths.push(treeKey(row.dataset.rootId, row.dataset.path));
         }
     });
     persistExpandedPaths(paths);
@@ -2548,7 +2574,7 @@ function getLoadedExpandableDirectoryPaths(nodes = directoryTreeData, result = [
             return;
         }
         if (node.has_children || (node.children_loaded && node.children.length > 0)) {
-            result.push(node.path);
+            result.push(node.treeKey || treeKey(node.root_id, node.path));
         }
         if (Array.isArray(node.children) && node.children.length > 0) {
             getLoadedExpandableDirectoryPaths(node.children, result);
@@ -2560,7 +2586,7 @@ function getLoadedExpandableDirectoryPaths(nodes = directoryTreeData, result = [
 function getRootDirectoryPaths() {
     return directoryTreeData
         .filter(node => node?.type === 'directory')
-        .map(node => node.path);
+        .map(node => node.treeKey || treeKey(node.root_id, node.path));
 }
 
 function toggleExpandAll() {
