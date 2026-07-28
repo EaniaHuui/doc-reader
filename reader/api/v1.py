@@ -204,7 +204,7 @@ def bootstrap():
         'user': current_user_dict(),
         'server_name': _server_name(),
         'version': _version(),
-        'roots': list_roots(include_abs=False),
+        'roots': list_roots(include_abs=True),
         'supported_file_types': {
             'editable': ['markdown', 'txt', 'json'],
             'readable': ['markdown', 'txt', 'json', 'image'],

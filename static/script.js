@@ -931,7 +931,14 @@ function ensureTreeActionButtons(row) {
     copyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         e.preventDefault();
-        copyTreePath(path || key);
+        
+        let fullPath = path || key;
+        const root = rootsById[row.dataset.rootId];
+        if (root && root.configured_path) {
+            fullPath = path ? `${root.configured_path}/${path}` : root.configured_path;
+        }
+        
+        copyTreePath(fullPath);
     });
     actionButtons.appendChild(copyBtn);
 
@@ -2157,7 +2164,14 @@ function toggleSidebar() {
 
 function copyPath() {
     if (!currentPath) return;
-    copyText(currentPath, '路径已复制');
+    
+    let fullPath = currentPath;
+    const root = rootsById[currentRootId];
+    if (root && root.configured_path) {
+        fullPath = currentPath ? `${root.configured_path}/${currentPath}` : root.configured_path;
+    }
+    
+    copyText(fullPath, '路径已复制');
 }
 
 function copyText(text, successMessage = 'Copied') {
